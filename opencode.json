@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "server": {
+    "port": 4096,
+    "hostname": "0.0.0.0",
+    "cors": ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173", "http://127.0.0.1:3000"]
+  },
+  "agent": {
+    "widget-assistant": {
+      "description": "前端嵌入式 AI 助手，仅支持页面问答与路由跳转",
+      "mode": "primary",
+      "prompt": "{file:./prompts/widget-system.txt}",
+      "tools": {
+        "write": false,
+        "edit": false,
+        "bash": false,
+        "skill": true,
+        "read": true
+      }
+    }
+  }
+}

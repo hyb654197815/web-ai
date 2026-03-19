@@ -1,0 +1,8 @@
+调用 skill({ name: "widget-knowledge-generator" }) 分析目录 {{ANALYZE_PATH}} 下的前端项目源码，并全量生成 routes.md 及各页面的 page-xxx.md。
+本次运行的 knowledge_skill_root 为 {{KNOWLEDGE_SKILL_ROOT}}，references_dir 为 {{REFERENCES_DIR}}。
+
+要求：
+1. 页面文档必须面向“页面问答与操作引导”场景，重点输出页面用途、关键步骤、字段说明与填写建议。
+2. 所有生成产物必须写入本次传入的 references_dir。
+3. 分析源码时读取 {{ANALYZE_PATH}} 下的文件。
+4. 本轮结束前先自行检查一次：确认源码中的所有可识别路由都已经进入 routes.md，且 routes.md 中每一条路由都已经有对应的 page-xxx.md；若发现遗漏，先补齐再结束。

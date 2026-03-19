@@ -1,0 +1,10 @@
+调用 skill({ name: "widget-knowledge-updater" }) 分析目录 {{ANALYZE_PATH}} 下的前端项目源码，并做增量同步。
+本次运行的 knowledge_skill_root 为 {{KNOWLEDGE_SKILL_ROOT}}，references_dir 为 {{REFERENCES_DIR}}。
+已知变更文件如下：
+{{CHANGE_LIST}}{{SCOPE_BLOCK}}
+
+要求：
+1. 必须先读取现有知识文档，再只更新受影响的 routes.md 行和 page-xxx.md；不要全量重写未受影响文档。
+2. 若涉及新增、删除、改名路由，需同步调整 routes.md 与页面文档。
+3. 所有读写都以本次传入的 knowledge_skill_root / references_dir 为准。
+4. 分析源码时读取 {{ANALYZE_PATH}} 下的文件。

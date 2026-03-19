@@ -1,0 +1,12 @@
+[当前页面]
+{{CURRENT_PAGE}}
+
+{{SESSION_HISTORY_SECTION}}[路由清单]
+{{ROUTES_SNAPSHOT}}
+
+{{RELATED_DOCS_SECTION}}
+
+[用户请求]
+{{USER_REQUEST}}
+
+请在能力范围内直接给出最终回复。如果需要跳转，返回 navigate JSON。如果用户是在询问如何操作、如何填写表单、字段要怎么写，就返回自然语言分步骤说明。不要返回选择器、脚本、DOM 信息或自动填写方案。

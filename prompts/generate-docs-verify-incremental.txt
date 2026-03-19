@@ -1,0 +1,13 @@
+调用 skill({ name: "widget-knowledge-updater" }) 对目录 {{ANALYZE_PATH}} 下的前端项目源码与现有知识文档执行一次“检查补全”。
+本次运行的 knowledge_skill_root 为 {{KNOWLEDGE_SKILL_ROOT}}，references_dir 为 {{REFERENCES_DIR}}。
+{{VERIFICATION_CONTEXT}}
+
+这是检查补全阶段，不是重新全量改写。必须先读取当前 references_dir 下现有的 routes.md 和相关 page-xxx.md，再对照源码逐项核对并只修正有问题的文档。
+
+检查补全要求：
+1. 源码中的所有可识别路由都必须出现在 routes.md。
+2. routes.md 中的每一条路由都必须映射到实际存在且命名正确的 page-xxx.md。
+3. 如果发现 routes.md 缺失路由、页面文档缺失、slug 或文档文件名不一致、页面文档明显为空白/占位/缺少关键章节，则只补齐或修正受影响的 routes.md 行和 page-xxx.md。
+4. 不要全量重写无关文档，不要删除仍然有效的内容。
+5. 分析源码时读取 {{ANALYZE_PATH}} 下的文件。
+6. 完成后再复核一次，确保“所有路由都在 routes.md 中，且所有路由都有对应页面文档”。

@@ -1,0 +1,13 @@
+调用 skill({ name: "widget-knowledge-generator" }) 对目录 {{ANALYZE_PATH}} 下的前端项目源码与当前知识文档执行一次“全量校准补全”。
+本次运行的 knowledge_skill_root 为 {{KNOWLEDGE_SKILL_ROOT}}，references_dir 为 {{REFERENCES_DIR}}。
+{{VERIFICATION_CONTEXT}}
+
+这是全量生成后的第二轮校准，不要停留在“发现缺失并建议改用 generator”的结论上；你现在就应直接使用 generator 完成校准与补齐。
+
+执行要求：
+1. 必须先读取当前 references_dir 下现有的 routes.md 和 page-xxx.md，再对照源码做完整复核。
+2. 如果发现源码中的路由未进入 routes.md、routes.md 中的某些路由缺少对应 page-xxx.md、slug 不一致、页面文档明显缺章或内容残缺，直接补齐或重建到完整状态。
+3. 允许基于 generator 的职责做全量重建或大范围修正；目标是最终结果完整，不要因为“缺得太多”而中止。
+4. 所有生成产物必须写入本次传入的 references_dir。
+5. 分析源码时读取 {{ANALYZE_PATH}} 下的文件。
+6. 结束前再次复核，确保“所有可识别路由都在 routes.md 中，且所有路由都有对应页面文档”。

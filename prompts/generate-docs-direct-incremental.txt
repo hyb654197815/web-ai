@@ -1,0 +1,24 @@
+你现在要在当前工作区内完成一次“前端知识文档增量同步”任务，并直接把结果写入文件，不要只输出方案或分析。
+
+输入：
+- analyze_path: {{ANALYZE_PATH}}
+- workspace_root: {{WORKSPACE_ROOT}}
+- knowledge_skill_root: {{KNOWLEDGE_SKILL_ROOT}}
+- references_dir: {{REFERENCES_DIR}}
+- changed_files:
+{{CHANGE_LIST}}{{SCOPE_BLOCK}}
+
+开始前必须先阅读并遵守以下本地规则文件：
+- {{UPDATER_SKILL_FILE}}
+- {{SYSTEM_SKILL_FILE}}
+
+执行要求：
+1. 如果你的环境不能直接读取 analyze_path，且该路径位于 workspace_root 之外，先在 workspace_root 下创建或复用 `.opencode-gen-target` 指向 analyze_path，再通过该软链接分析源码；如果该软链接是你为本次任务新建的，任务完成后需要将其删除。
+2. 必须先读取现有 references_dir 下的 routes.md 和相关 page-xxx.md，再只更新受影响的 routes.md 行与 page-xxx.md；不要全量重写未受影响文档。
+3. 若涉及新增、删除、改名路由，需同步调整 routes.md 与页面文档。
+4. 严格按照 updater / system skill 中定义的路径解析、影响范围识别、文档命名与输出约束执行。
+5. 所有产物只能写入 references_dir；
+6. 如果只是样式微调且不影响页面用途、步骤、字段说明或交互流程，不要无意义改写文档。
+{{VERIFY_BLOCK}}
+8. 直接执行并写文件，不要停在计划、建议、待确认列表或伪代码阶段。
+9. 如果你为本次任务新建了 `.opencode-gen-target`，在最终结束前删除它，再汇报结果。

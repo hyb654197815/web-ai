@@ -1,0 +1,22 @@
+你现在要在当前工作区内完成一次“前端知识文档全量生成”任务，并直接把结果写入文件，不要只输出方案或分析。
+
+输入：
+- analyze_path: {{ANALYZE_PATH}}
+- workspace_root: {{WORKSPACE_ROOT}}
+- knowledge_skill_root: {{KNOWLEDGE_SKILL_ROOT}}
+- references_dir: {{REFERENCES_DIR}}
+
+开始前必须先阅读并遵守以下本地规则文件：
+- {{GENERATOR_SKILL_FILE}}
+- {{SYSTEM_SKILL_FILE}}
+
+执行要求：
+1. 如果你的环境不能直接读取 analyze_path，且该路径位于 workspace_root 之外，先在 workspace_root 下创建或复用 `.opencode-gen-target` 指向 analyze_path，再通过该软链接分析源码；如果该软链接是你为本次任务新建的，任务完成后需要将其删除。
+2. 严格按照 generator / system skill 中定义的路径解析、输出目录、路由索引、页面文档结构与命名规则执行。
+3. 所有产物只能写入 references_dir；只允许写 routes.md 和 page-xxx.md。
+4. 本次以传入的 knowledge_skill_root / references_dir 为准。
+5. 页面文档必须面向“页面问答与操作引导”场景，重点输出页面用途、关键步骤、字段说明与填写建议。
+6. 完成前必须自检：源码中的所有可识别路由都已进入 routes.md，且 routes.md 中每条路由都有对应 page-xxx.md；若发现遗漏，先补齐再结束。
+{{VERIFY_BLOCK}}
+8. 直接执行并写文件，不要停在计划、建议、待确认列表或伪代码阶段。
+9. 如果你为本次任务新建了 `.opencode-gen-target`，在最终结束前删除它，再汇报结果。

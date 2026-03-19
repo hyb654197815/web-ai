@@ -1,0 +1,29 @@
+{
+  "name": "portable-ai-agent-widget",
+  "version": "1.0.0",
+  "description": "便携式前端 AI Agent 入口 - 页面问答与路由跳转",
+  "type": "module",
+  "main": "./dist/agent-widget.js",
+  "module": "./dist/agent-widget.js",
+  "exports": {
+    ".": {
+      "import": "./dist/agent-widget.js",
+      "default": "./dist/agent-widget.js"
+    },
+    "./iife": "./dist/agent-widget.iife.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "preview": "vite preview",
+    "gen-docs": "node scripts/generate-docs.js"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  },
+  "dependencies": {}
+}
