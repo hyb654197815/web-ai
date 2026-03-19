@@ -98,13 +98,24 @@ npm run build
 
 ### 2. 启动后端
 
+方式 A：本地 Python 启动
+
 ```bash
 cd backend
 pip install -r requirements.txt
 python main.py
 ```
 
+方式 B：Docker 启动
+
+```bash
+docker build -t web-ai-backend .
+docker run --rm -p 4096:4096 --env-file backend/.env web-ai-backend
+```
+
 默认后端地址：`http://localhost:4096/api`
+
+容器镜像会内置 `.opencode`、`.claude`、`.codex` 和 `backend`，后端会继续按环境变量和默认目录自动寻找知识库。
 
 ### 3. 本地调试
 
@@ -589,15 +600,48 @@ AIAgent.setSessionId(sessionId);
 | `WIDGET_KNOWLEDGE_SKILL_DIR` | 显式指定 `widget-knowledge-system` 根目录 |
 | `WIDGET_SKILLS_DIR` | 显式指定 skills 目录 |
 | `CORS_ORIGINS` | 允许的前端来源，逗号分隔 |
+| `HOST` | 服务监听地址，默认 `0.0.0.0` |
 | `PORT` | 后端端口，默认 `4096` |
 
 ### 启动命令
+
+本地 Python 启动：
 
 ```bash
 cd backend
 pip install -r requirements.txt
 python main.py
 ```
+
+Docker 启动：
+
+```bash
+docker build -t web-ai-backend .
+docker run --rm -p 4096:4096 --env-file backend/.env web-ai-backend
+```
+
+如果不想使用 `--env-file`，也可以直接逐个传入环境变量：
+
+```bash
+docker run --rm -p 4096:4096 ^
+  -e OPENAI_API_KEY=your_api_key ^
+  -e OPENAI_API_BASE=https://your-openai-compatible-base ^
+  -e OPENAI_MODEL_NAME=your_model_name ^
+  -e CORS_ORIGINS=http://localhost:5173 ^
+  web-ai-backend
+```
+
+如果你修改了 `PORT`，请同时调整容器内环境变量和端口映射，例如：
+
+```bash
+docker run --rm -p 8080:8080 -e PORT=8080 --env-file backend/.env web-ai-backend
+```
+
+说明：
+
+- `Dockerfile` 位于仓库根目录，需要在项目根目录执行 `docker build`
+- 镜像会复制 `.opencode`、`.claude`、`.codex`、`backend`
+- `backend/.env` 不会打进镜像，适合通过 `docker run --env-file backend/.env` 在运行时注入
 
 后端会按以下顺序寻找知识库：
 

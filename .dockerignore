@@ -1,0 +1,16 @@
+**
+!backend/
+!backend/**
+!.claude/
+!.claude/**
+!.codex/
+!.codex/**
+!.opencode/
+!.opencode/**
+!Dockerfile
+
+backend/.env
+backend/.venv/
+backend/__pycache__/
+**/__pycache__/
+**/*.pyc
