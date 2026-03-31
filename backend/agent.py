@@ -21,6 +21,7 @@ class AgentRoundResult:
     prompt: str
     routes: tuple[RouteEntry, ...]
     related_docs: tuple[tuple[str, str], ...]
+    current_page_doc: str
     raw: str
     payload: dict[str, Any]
 
@@ -44,11 +45,16 @@ def _execute_agent_round(
     context = build_prompt_context(user_message, pathname, history, expand_scope=expand_scope)
     messages = build_messages(context.prompt)
     raw = invoke_model(messages, streaming=False)
-    payload = normalize_model_output(raw, user_message, context.routes, pathname) if raw else {"message": DEFAULT_MESSAGE}
+    payload = (
+        normalize_model_output(raw, user_message, context.routes, pathname, context.current_page_doc)
+        if raw
+        else {"message": DEFAULT_MESSAGE}
+    )
     return AgentRoundResult(
         prompt=context.prompt,
         routes=context.routes,
         related_docs=context.related_docs,
+        current_page_doc=context.current_page_doc,
         raw=raw,
         payload=payload,
     )
@@ -97,8 +103,11 @@ def _stream_agent_round(
         prompt=context.prompt,
         routes=context.routes,
         related_docs=context.related_docs,
+        current_page_doc=context.current_page_doc,
         raw=raw,
-        payload=normalize_model_output(raw, user_message, context.routes, pathname) if raw else {"message": DEFAULT_MESSAGE},
+        payload=normalize_model_output(raw, user_message, context.routes, pathname, context.current_page_doc)
+        if raw
+        else {"message": DEFAULT_MESSAGE},
     )
 
 

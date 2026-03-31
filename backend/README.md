@@ -1,8 +1,9 @@
 # 便携式前端 AI Agent 后端
 
-基于 FastAPI + LangChain 的后端服务，当前仅支持：
+基于 FastAPI + LangChain 的后端服务，当前支持：
 
 - 路由跳转：`navigate`
+- 页面表单操作：`form`
 - 站内操作问答：页面说明、流程说明、表单填写指引
 
 不再支持：
@@ -17,6 +18,8 @@
 - `POST /api/chat/stream`
 - `POST /api/session`
 - `POST /api/session/{sessionId}/message`
+- `GET /api/page-agent/config`
+- `POST /api/page-agent/chat/completions`
 - `GET /api/health`
 
 ## SSE 事件

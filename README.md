@@ -2,20 +2,20 @@
 
 一个面向前端项目的可嵌入式 AI Agent 方案，包含两部分能力：
 
-1. 运行时能力：在业务站点中嵌入前端 Agent Widget，通过后端知识库回答“当前页怎么操作”“表单怎么填写”“下一步做什么”，并在用户明确要求时执行安全的路由跳转。
+1. 运行时能力：在业务站点中嵌入前端 Agent Widget，通过后端知识库回答“当前页怎么操作”“表单怎么填写”“下一步做什么”，并在用户明确要求时执行安全的路由跳转或当前页表单操作。
 2. 知识库能力：通过 `gen-docs` 脚本或提示词，把业务前端项目自动整理成 `routes.md + page-xxx.md` 知识文档，并以 Skill 的形式复用到 Codex、OpenCode、Claude Code、Cursor、Trae 等工具中。
 
 本仓库适合以下场景：
 
-- 给已有后台/中台/运营系统增加“页面问答 + 路由跳转”型 AI 助手
+- 给已有后台/中台/运营系统增加“页面问答 + 路由跳转 + 表单操作”型 AI 助手
 - 为大型前端项目建立可持续维护的页面知识库
 - 让 AI 编码工具先按业务文档定位页面，再实施代码修改
 - 在不同 Agent 工具之间复用同一套前端项目知识
 
 ## 核心能力
 
-- 前端 Widget 只保留两类动作：页面问答、`navigate` 路由跳转
-- 后端基于 FastAPI + LangChain，自动读取知识库并返回自然语言或导航动作
+- 前端 Widget 只保留三类受控能力：页面问答、`navigate` 路由跳转、`form` 当前页表单操作
+- 后端基于 FastAPI + LangChain，自动读取知识库并返回自然语言、导航动作或表单动作
 - `gen-docs` 支持 `OpenCode / Codex / Claude Code` 三种 CLI runner
 - 对 `Cursor / Trae` 这类 IDE Agent，支持 `--print-prompt` 输出可直接粘贴执行的提示词
 - 支持把 Skill 复制到目标项目中，让 AI 工具基于业务文档定位代码并直接修改
@@ -31,7 +31,8 @@
 4. 后端返回：
    - 自然语言答案
    - 或 `{ action: "navigate", params: { route } }`
-5. 前端只执行受控的 `navigate`，不会执行脚本、DOM 注入或自动填表
+   - 或 `{ action: "form", params: { message, pageInfo } }`
+5. 前端只执行受控的 `navigate` 与 `form`，不会执行后端返回的脚本或 DOM 注入指令；表单操作交由 `page-agent` 在当前页内完成
 
 ### 知识库链路
 
@@ -466,6 +467,8 @@ AIAgent.setSessionId(sessionId);
   data-mode="auto"
   data-chat-path="/chat"
   data-stream-path="/chat/stream"
+  data-page-agent-config-path="/page-agent/config"
+  data-page-agent-llm-base-path="/page-agent"
   data-stream="true"
 ></script>
 ```
@@ -489,6 +492,9 @@ AIAgent.setSessionId(sessionId);
 | `data-mode` | `auto | crewai | opencode` |
 | `data-chat-path` | 聊天接口路径，默认 `/chat` |
 | `data-stream-path` | SSE 接口路径，默认 `/chat/stream` |
+| `data-page-agent-config-path` | PageAgent 运行时配置接口，默认 `/page-agent/config` |
+| `data-page-agent-llm-base-path` | PageAgent LLM 代理基础路径，默认 `/page-agent` |
+| `data-page-agent-model` | 可选，手动覆盖 PageAgent 模型名 |
 | `data-stream` | 是否启用流式，`false` 时关闭 |
 | `data-session-id` | 初始会话 ID |
 
@@ -515,6 +521,9 @@ AIAgent.setSessionId(sessionId);
 | `chatPath` | 聊天接口路径，默认 `/chat` |
 | `stream` | 是否启用 SSE，默认 `true` |
 | `streamPath` | 流式接口路径，默认 `/chat/stream` |
+| `pageAgentConfigPath` | PageAgent 运行时配置接口，默认 `/page-agent/config` |
+| `pageAgentLLMBasePath` | PageAgent LLM 代理基础路径，默认 `/page-agent` |
+| `pageAgentModel` | 可选，直接指定 PageAgent 模型名 |
 | `sessionId` | 初始会话 ID |
 | `requestTimeoutMs` | 请求超时，单位毫秒 |
 | `headers` | 额外请求头 |
@@ -547,6 +556,19 @@ AIAgent.setSessionId(sessionId);
 }
 ```
 
+### 表单动作响应
+
+```json
+{
+  "action": "form",
+  "params": {
+    "message": "点击页面的新增按钮，然后输入用户名，点击确认按钮",
+    "pageInfo": "当前路由命中的 page-xxx.md 内容"
+  },
+  "sessionId": "optional-session-id"
+}
+```
+
 ### 问答响应
 
 ```json
@@ -574,17 +596,25 @@ AIAgent.setSessionId(sessionId);
 - `href`
 - `title`
 
-不会再采集：
+前端不会向后端额外采集：
 
 - DOM 快照
 - 页面注入脚本
 - 自动填表数据
 
+收到 `form` 动作后，前端会把原始用户请求交给 `page-agent`，并把当前路由对应的 `page-xxx.md` 作为业务说明注入到 PageAgent 的页面级指令中；实际 LLM 请求通过后端 `/api/page-agent/chat/completions` 代理转发，继续沿用 server 上配置的 `OPENAI_API_BASE`、`OPENAI_API_KEY` 和 `OPENAI_MODEL_NAME`。
+
+### PageAgent 运行时接口
+
+- `GET /api/page-agent/config`
+- `POST /api/page-agent/chat/completions`
+
 ## 安全边界
 
-- 前端只允许执行 `navigate`
+- 前端只允许执行 `navigate` 和 `form`
 - 后端输出会做动作归一化与危险内容过滤
-- 禁止返回脚本、DOM 操作、自动提交表单等可执行指令
+- 后端不会把脚本、选择器或 DOM 注入指令下发给前端
+- PageAgent 的模型密钥保留在 server 侧，通过代理接口转发，不直接暴露给浏览器
 - 输入消息有长度限制与危险模式拦截
 
 ## 后端部署说明

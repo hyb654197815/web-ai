@@ -1,13 +1,13 @@
 /**
  * 便携式前端 AI Agent 入口
- * 能力限制：仅支持「页面问答」与「路由跳转」。
+ * 能力限制：支持「页面问答」「路由跳转」与「页面表单操作」。
  */
 'use strict';
 
 const globalObject = typeof window !== 'undefined' ? window : globalThis;
 
 const MAX_MESSAGE_LENGTH = 2000;
-const ALLOWED_ACTIONS = new Set(['navigate']);
+const ALLOWED_ACTIONS = new Set(['navigate', 'form']);
 const FORBIDDEN_INPUT_PATTERNS = [/<script/i, /javascript:/i, /on\w+\s*=\s*/i];
 const MOBILE_BREAKPOINT = 640;
 const FLOATING_MARGIN = 20;
@@ -37,6 +37,9 @@ export const defaultConfig = {
   requestTimeoutMs: null,
   chatPath: '/chat',
   streamPath: '/chat/stream',
+  pageAgentConfigPath: '/page-agent/config',
+  pageAgentLLMBasePath: '/page-agent',
+  pageAgentModel: null,
   stream: true,
   mode: 'auto',
   sessionId: null,
@@ -45,6 +48,8 @@ export const defaultConfig = {
 };
 
 let config = { ...defaultConfig };
+let pageAgentModulePromise = null;
+let pageAgentRuntimePromise = null;
 
 function isPlainObject(value) {
   return Object.prototype.toString.call(value) === '[object Object]';
@@ -337,6 +342,28 @@ function normalizeConfig(opts = {}) {
     next.streamPath = `/${next.streamPath}`;
   }
 
+  if (typeof next.pageAgentConfigPath !== 'string' || next.pageAgentConfigPath.trim() === '') {
+    next.pageAgentConfigPath = defaultConfig.pageAgentConfigPath;
+  }
+  if (!next.pageAgentConfigPath.startsWith('/')) {
+    next.pageAgentConfigPath = `/${next.pageAgentConfigPath}`;
+  }
+
+  if (typeof next.pageAgentLLMBasePath !== 'string' || next.pageAgentLLMBasePath.trim() === '') {
+    next.pageAgentLLMBasePath = defaultConfig.pageAgentLLMBasePath;
+  }
+  if (!next.pageAgentLLMBasePath.startsWith('/')) {
+    next.pageAgentLLMBasePath = `/${next.pageAgentLLMBasePath}`;
+  }
+
+  if (typeof next.pageAgentModel === 'string') {
+    next.pageAgentModel = next.pageAgentModel.trim() || null;
+  } else if (next.pageAgentModel == null) {
+    next.pageAgentModel = null;
+  } else {
+    next.pageAgentModel = String(next.pageAgentModel).trim() || null;
+  }
+
   if (!isPlainObject(next.headers)) {
     next.headers = {};
   }
@@ -394,21 +421,46 @@ function tryParseJSON(text) {
   }
 }
 
-function extractMessageFromPayload(payload) {
-  if (!payload || typeof payload !== 'object') return '';
+function getPayloadCandidates(payload) {
+  if (!payload || typeof payload !== 'object') return [];
 
-  if (typeof payload.message === 'string' && payload.message.trim()) {
-    return payload.message.trim();
+  const queue = [payload];
+  const candidates = [];
+  const seen = new Set();
+
+  while (queue.length) {
+    const current = queue.shift();
+    if (!current || typeof current !== 'object' || seen.has(current)) continue;
+
+    seen.add(current);
+    candidates.push(current);
+
+    ['payload', 'result', 'data'].forEach((key) => {
+      if (current[key] && typeof current[key] === 'object') {
+        queue.push(current[key]);
+      }
+    });
   }
-  if (typeof payload.content === 'string' && payload.content.trim()) {
-    return payload.content.trim();
-  }
-  if (typeof payload.answer === 'string' && payload.answer.trim()) {
-    return payload.answer.trim();
-  }
-  if (Array.isArray(payload.parts)) {
-    const textPart = payload.parts.find((part) => part && typeof part.text === 'string' && part.text.trim());
-    if (textPart) return textPart.text.trim();
+
+  return candidates;
+}
+
+function extractMessageFromPayload(payload) {
+  const candidates = getPayloadCandidates(payload);
+  for (const candidate of candidates) {
+    if (typeof candidate.message === 'string' && candidate.message.trim()) {
+      return candidate.message.trim();
+    }
+    if (typeof candidate.content === 'string' && candidate.content.trim()) {
+      return candidate.content.trim();
+    }
+    if (typeof candidate.answer === 'string' && candidate.answer.trim()) {
+      return candidate.answer.trim();
+    }
+    if (Array.isArray(candidate.parts)) {
+      const textPart = candidate.parts.find((part) => part && typeof part.text === 'string' && part.text.trim());
+      if (textPart) return textPart.text.trim();
+    }
   }
 
   return '';
@@ -446,6 +498,33 @@ function normalizeAction(raw) {
   if (!ALLOWED_ACTIONS.has(action)) return null;
 
   const params = isPlainObject(raw.params) ? raw.params : {};
+
+  if (action === 'form') {
+    const taskMessage =
+      typeof params.message === 'string'
+        ? params.message.trim()
+        : typeof raw.task === 'string'
+        ? raw.task.trim()
+        : '';
+    if (!taskMessage) return null;
+
+    const pageInfo =
+      typeof params.pageInfo === 'string'
+        ? params.pageInfo
+        : typeof raw.pageInfo === 'string'
+        ? raw.pageInfo
+        : '';
+
+    return {
+      action: 'form',
+      params: {
+        message: taskMessage,
+        pageInfo,
+      },
+      message: typeof raw.message === 'string' ? raw.message : '',
+    };
+  }
+
   const route =
     typeof params.route === 'string'
       ? params.route
@@ -465,8 +544,11 @@ function normalizeAction(raw) {
 }
 
 function parseActionFromPayload(payload) {
-  const direct = normalizeAction(payload);
-  if (direct) return direct;
+  const candidates = getPayloadCandidates(payload);
+  for (const candidate of candidates) {
+    const direct = normalizeAction(candidate);
+    if (direct) return direct;
+  }
 
   const message = extractMessageFromPayload(payload);
   const candidate = extractJsonCandidateFromText(message);
@@ -511,6 +593,38 @@ async function postJSON(url, body) {
         ...config.headers,
       },
       body: JSON.stringify(body),
+      signal,
+    });
+
+    const rawText = await response.text();
+    const parsed = tryParseJSON(rawText);
+    const payload = parsed ?? { message: rawText };
+
+    if (!response.ok) {
+      throw new HttpError(`请求失败（${response.status}）`, response.status, payload);
+    }
+
+    return payload;
+  } catch (error) {
+    if (hasTimeout && error.name === 'AbortError') {
+      throw new Error(`请求超时（${config.requestTimeoutMs}ms）`);
+    }
+    throw error;
+  } finally {
+    cleanup();
+  }
+}
+
+async function getJSON(url) {
+  const { signal, cleanup, hasTimeout } = withTimeout(config.requestTimeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        ...config.headers,
+      },
       signal,
     });
 
@@ -676,8 +790,16 @@ async function postSSE(url, body, onEvent) {
 }
 
 function updateSessionId(payload) {
-  if (!payload || typeof payload !== 'object') return;
-  config.sessionId = payload.sessionId || payload.session_id || config.sessionId;
+  const candidates = getPayloadCandidates(payload);
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === 'object') {
+      const nextSessionId = candidate.sessionId || candidate.session_id;
+      if (nextSessionId) {
+        config.sessionId = nextSessionId;
+        return;
+      }
+    }
+  }
 }
 
 async function sendToCrewAI(message) {
@@ -1897,17 +2019,70 @@ function setPending(isPending) {
   if (newSessionBtn) newSessionBtn.disabled = isPending;
 }
 
-async function executeAction(actionObj) {
-  if (!actionObj || typeof actionObj !== 'object') {
-    return { ok: false, message: '无效动作' };
+function resolvePageAgentLanguage() {
+  const documentLanguage = typeof document !== 'undefined' ? sanitizeText(document.documentElement?.lang, 20) : '';
+  const browserLanguage = sanitizeText(globalObject.navigator?.language, 20);
+  const candidate = documentLanguage || browserLanguage || 'zh-CN';
+  return /^zh/i.test(candidate) ? 'zh-CN' : 'en-US';
+}
+
+function buildPageAgentInstructions(pageInfo) {
+  const normalizedPageInfo = typeof pageInfo === 'string' ? pageInfo.trim() : '';
+  const parts = [
+    '你正在当前页面内执行用户要求的页面表单操作。',
+    '执行要求：',
+    '- 优先严格遵守用户原始请求，不要擅自改写任务。',
+    '- 只操作当前单页内可见且可交互的内容，不要跳出当前页面，也不要打开新标签页。',
+    '- 如果遇到验证码、权限不足、缺少必要信息或页面本身异常，请明确说明原因并安全结束任务。',
+    '- 以下页面文档用于补充业务语义、字段含义和常见流程；如果文档与页面实际状态不一致，以当前页面真实内容为准。',
+  ];
+
+  if (normalizedPageInfo) {
+    parts.push(`[当前页面文档]\n${normalizedPageInfo}`);
   }
 
-  logAgent('info', 'Execute action request', actionObj);
+  return parts.join('\n\n');
+}
 
-  if (actionObj.action !== 'navigate') {
-    return { ok: false, message: `不支持的动作：${String(actionObj.action || '')}` };
+async function loadPageAgentModule() {
+  if (!pageAgentModulePromise) {
+    pageAgentModulePromise = import('page-agent');
+  }
+  return pageAgentModulePromise;
+}
+
+async function resolvePageAgentRuntimeConfig() {
+  const proxyBaseURL = `${trimSlash(config.backendUrl)}${config.pageAgentLLMBasePath}`;
+  if (config.pageAgentModel) {
+    return {
+      enabled: true,
+      model: config.pageAgentModel,
+      baseURL: proxyBaseURL,
+    };
   }
 
+  const payload = await getJSON(`${trimSlash(config.backendUrl)}${config.pageAgentConfigPath}`);
+  const candidates = getPayloadCandidates(payload);
+  const runtime = candidates.find((candidate) => candidate && typeof candidate === 'object') || {};
+  const model = typeof runtime.model === 'string' ? runtime.model.trim() : '';
+  return {
+    enabled: runtime.enabled !== false,
+    model,
+    baseURL: proxyBaseURL,
+  };
+}
+
+async function getPageAgentRuntimeConfig() {
+  if (!pageAgentRuntimePromise) {
+    pageAgentRuntimePromise = resolvePageAgentRuntimeConfig().catch((error) => {
+      pageAgentRuntimePromise = null;
+      throw error;
+    });
+  }
+  return pageAgentRuntimePromise;
+}
+
+async function executeNavigateAction(actionObj) {
   const route = actionObj.params?.route;
   if (!isSafeRoute(route)) {
     return { ok: false, message: '无效跳转地址' };
@@ -1925,9 +2100,82 @@ async function executeAction(actionObj) {
   return { ok: true, message: route };
 }
 
+async function executeFormAction(actionObj) {
+  const params = isPlainObject(actionObj.params) ? actionObj.params : {};
+  const taskMessage = typeof params.message === 'string' ? params.message.trim() : '';
+  if (!taskMessage) {
+    return { ok: false, message: '缺少表单操作任务' };
+  }
+
+  const pageInfo = typeof params.pageInfo === 'string' ? params.pageInfo : '';
+  const runtime = await getPageAgentRuntimeConfig();
+  if (!runtime.enabled || !runtime.model) {
+    return { ok: false, message: '当前 server 未配置可用的 PageAgent 模型' };
+  }
+
+  const { PageAgent } = await loadPageAgentModule();
+  const agent = new PageAgent({
+    baseURL: runtime.baseURL,
+    apiKey: '',
+    model: runtime.model,
+    language: resolvePageAgentLanguage(),
+    promptForNextTask: false,
+    instructions: {
+      getPageInstructions: () => buildPageAgentInstructions(pageInfo),
+    },
+  });
+
+  agent.onAskUser = async (question) => {
+    const promptText = sanitizeText(question, 1000) || '请补充表单操作需要的信息';
+    const answer = typeof globalObject.prompt === 'function' ? globalObject.prompt(promptText) : '';
+    return typeof answer === 'string' ? answer.trim() : '';
+  };
+
+  try {
+    const result = await agent.execute(taskMessage);
+    const summary = typeof result?.data === 'string' ? result.data.trim() : '';
+    return {
+      ok: result?.success !== false,
+      message: summary || (result?.success === false ? '页面表单操作未完成' : '页面表单操作已完成'),
+      data: result,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `页面表单操作失败：${error?.message || '未知错误'}`,
+    };
+  } finally {
+    try {
+      agent.panel.hide();
+    } catch {}
+    try {
+      agent.dispose();
+    } catch {}
+  }
+}
+
+async function executeAction(actionObj) {
+  if (!actionObj || typeof actionObj !== 'object') {
+    return { ok: false, message: '无效动作' };
+  }
+
+  logAgent('info', 'Execute action request', actionObj);
+
+  if (actionObj.action === 'navigate') {
+    return executeNavigateAction(actionObj);
+  }
+  if (actionObj.action === 'form') {
+    return executeFormAction(actionObj);
+  }
+  return { ok: false, message: `不支持的动作：${String(actionObj.action || '')}` };
+}
+
 function getActionExecutionMessage(action) {
   if (action.action === 'navigate') {
     return `正在跳转到 ${action.params.route}`;
+  }
+  if (action.action === 'form') {
+    return '正在执行当前页面表单操作...';
   }
   return '正在执行操作...';
 }
@@ -1941,8 +2189,13 @@ async function applyResolvedAction(action, backendMessage = '', options = {}) {
   }
 
   const execution = await executeAction(action);
-  if (!execution.ok && announce) {
-    appendMessage(execution.message || '动作执行失败', 'error');
+  if (announce) {
+    const executionMessage = typeof execution.message === 'string' ? execution.message.trim() : '';
+    const shouldRenderExecutionMessage =
+      (!!executionMessage && !execution.ok) || (action.action === 'form' && !!executionMessage && executionMessage !== actionMessage);
+    if (shouldRenderExecutionMessage) {
+      appendMessage(executionMessage, execution.ok ? 'assistant' : 'error');
+    }
   }
 
   return { action, execution };
@@ -2331,6 +2584,7 @@ function initWidget() {
 const AIAgent = {
   init(options = {}) {
     config = normalizeConfig(options);
+    pageAgentRuntimePromise = null;
     initWidget();
     return this;
   },
@@ -2392,6 +2646,9 @@ function getAutoInitConfig(script) {
   if (script.dataset.mode) cfg.mode = script.dataset.mode;
   if (script.dataset.chatPath) cfg.chatPath = script.dataset.chatPath;
   if (script.dataset.streamPath) cfg.streamPath = script.dataset.streamPath;
+  if (script.dataset.pageAgentConfigPath) cfg.pageAgentConfigPath = script.dataset.pageAgentConfigPath;
+  if (script.dataset.pageAgentLlmBasePath) cfg.pageAgentLLMBasePath = script.dataset.pageAgentLlmBasePath;
+  if (script.dataset.pageAgentModel) cfg.pageAgentModel = script.dataset.pageAgentModel;
   if (script.dataset.sessionId) cfg.sessionId = script.dataset.sessionId;
   if (typeof script.dataset.stream === 'string') cfg.stream = script.dataset.stream !== 'false';
 

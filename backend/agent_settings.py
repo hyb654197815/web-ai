@@ -2,11 +2,39 @@ import os
 import re
 
 DEFAULT_MESSAGE = "暂时无法提供答案。"
-OUT_OF_SCOPE_MESSAGE = "我主要负责平台内页面导航、站内操作问答，以及表单填写指引。"
+OUT_OF_SCOPE_MESSAGE = "我主要负责平台内页面导航、站内操作问答，以及页面表单操作。"
 
-ALLOWED_ACTIONS = {"navigate"}
+ALLOWED_ACTIONS = {"navigate", "form"}
 NAV_INTENT_KEYWORDS = ("跳转", "进入", "打开", "前往", "去", "导航", "切换到", "访问", "navigate", "go to")
 GUIDE_INTENT_KEYWORDS = ("如何", "怎么", "步骤", "指引", "引导", "填写", "表单", "说明", "介绍", "帮助")
+FORM_INTENT_KEYWORDS = (
+    "点击",
+    "输入",
+    "填写",
+    "填入",
+    "选择",
+    "勾选",
+    "提交",
+    "确认",
+    "保存",
+    "新增",
+    "添加",
+    "创建",
+    "新建",
+    "修改",
+    "编辑",
+    "搜索",
+    "查询",
+    "筛选",
+    "重置",
+    "上传",
+    "导入",
+    "删除",
+    "帮我",
+    "替我",
+    "执行",
+    "操作",
+)
 DISALLOWED_RESPONSE_PATTERNS = (
     re.compile(r"<script", flags=re.IGNORECASE),
     re.compile(r"javascript\s*:", flags=re.IGNORECASE),

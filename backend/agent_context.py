@@ -29,6 +29,7 @@ class PromptContext:
     prompt: str
     routes: tuple[RouteEntry, ...]
     related_docs: tuple[tuple[str, str], ...]
+    current_page_doc: str
 
 
 def _clean_filename(filename: str) -> str:
@@ -282,6 +283,8 @@ def build_prompt_context(
     expand_scope: bool = False,
 ) -> PromptContext:
     routes = load_routes()
+    current_route = find_current_route(pathname, routes)
+    current_page_doc = read_page_doc(current_route.doc_file) if current_route and current_route.doc_file else ""
     related_docs = select_related_docs(user_message, pathname, routes, expand_scope=expand_scope)
     history_text = format_history(history)
     history_section = f"[会话历史]\n{history_text}\n\n" if history_text else ""
@@ -292,4 +295,4 @@ def build_prompt_context(
         related_docs_section=format_related_docs_section(related_docs),
         user_request=str(user_message or "").strip(),
     )
-    return PromptContext(prompt=prompt, routes=routes, related_docs=related_docs)
+    return PromptContext(prompt=prompt, routes=routes, related_docs=related_docs, current_page_doc=current_page_doc)

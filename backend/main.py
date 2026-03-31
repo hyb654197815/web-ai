@@ -5,19 +5,23 @@ import threading
 import uuid
 from collections.abc import Iterator
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent_runtime import DEFAULT_MESSAGE, run_agent, stream_agent_events
-from config import CORS_ORIGINS, PORT, REFERENCES_DIR
+from agent_settings import ALLOWED_ACTIONS
+from config import CORS_ORIGINS, MODEL_NAME, NVIDIA_API_KEY, NVIDIA_BASE_URL, PORT, REFERENCES_DIR
 
 app = FastAPI(
     title="便携式前端 AI Agent 后端",
-    description="基于 LangChain 的前端站点 Agent 服务，仅支持路由跳转与站内操作问答。",
+    description="基于 LangChain 的前端站点 Agent 服务，支持路由跳转、站内问答与页面表单操作。",
 )
 
 app.add_middleware(
@@ -56,6 +60,47 @@ _SESSION_HISTORY: dict[str, list[dict[str, str]]] = {}
 @app.get("/api/health")
 def health():
     return {"status": "ok", "knowledge_dir": REFERENCES_DIR}
+
+
+def _page_agent_llm_enabled() -> bool:
+    return bool((NVIDIA_BASE_URL or "").strip() and (MODEL_NAME or "").strip() and (NVIDIA_API_KEY or "").strip())
+
+
+def _page_agent_proxy_base_url() -> str:
+    return str(NVIDIA_BASE_URL or "").rstrip("/")
+
+
+def _build_proxy_request_body(raw_body: bytes) -> bytes:
+    if not raw_body:
+        return raw_body
+
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        return raw_body
+
+    if isinstance(payload, dict):
+        payload["model"] = MODEL_NAME
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return raw_body
+
+
+def _build_page_agent_proxy_headers() -> dict[str, str]:
+    # Some upstream OpenAI-compatible gateways block urllib's default User-Agent.
+    return {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {NVIDIA_API_KEY}",
+        "User-Agent": "OpenAI/Python 1.0",
+    }
+
+
+@app.get("/api/page-agent/config")
+def page_agent_config() -> dict[str, Any]:
+    return {
+        "enabled": _page_agent_llm_enabled(),
+        "model": str(MODEL_NAME or "").strip(),
+    }
 
 
 def _normalize_path_candidate(value: str | None) -> str:
@@ -159,7 +204,7 @@ def _record_session_turn(session_id: str, user_message: str, assistant_payload: 
     if not normalized_user:
         return
 
-    if assistant_payload.get("action") == "navigate":
+    if assistant_payload.get("action") in ALLOWED_ACTIONS:
         try:
             assistant_message = json.dumps(assistant_payload, ensure_ascii=False)
         except TypeError:
@@ -239,6 +284,31 @@ def chat(body: ChatRequest, stream: bool = Query(False, description="是否启�
     result["sessionId"] = session_id
     _record_session_turn(session_id, body.message, result)
     return result
+
+
+@app.post("/api/page-agent/chat/completions", response_model=None)
+async def page_agent_chat_completions(request: Request) -> Response:
+    if not _page_agent_llm_enabled():
+        raise HTTPException(status_code=503, detail="PageAgent LLM is not configured on server")
+
+    upstream_request = UrlRequest(
+        f"{_page_agent_proxy_base_url()}/chat/completions",
+        data=_build_proxy_request_body(await request.body()),
+        method="POST",
+        headers=_build_page_agent_proxy_headers(),
+    )
+
+    try:
+        with urlopen(upstream_request, timeout=120) as upstream_response:
+            content = upstream_response.read()
+            content_type = upstream_response.headers.get("Content-Type", "application/json")
+            return Response(content=content, status_code=upstream_response.status, media_type=content_type.split(";")[0])
+    except HTTPError as exc:
+        content = exc.read()
+        content_type = exc.headers.get("Content-Type", "application/json") if exc.headers else "application/json"
+        return Response(content=content, status_code=exc.code, media_type=content_type.split(";")[0])
+    except URLError as exc:
+        raise HTTPException(status_code=502, detail=f"Upstream LLM request failed: {exc.reason}") from exc
 
 
 @app.post("/api/chat/stream", response_model=None)

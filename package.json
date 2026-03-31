@@ -1,7 +1,7 @@
 {
   "name": "portable-ai-agent-widget",
   "version": "1.0.0",
-  "description": "便携式前端 AI Agent 入口 - 页面问答与路由跳转",
+  "description": "便携式前端 AI Agent 入口 - 页面问答、路由跳转与表单操作",
   "type": "module",
   "main": "./dist/agent-widget.js",
   "module": "./dist/agent-widget.js",
@@ -25,5 +25,8 @@
   "devDependencies": {
     "vite": "^5.0.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "page-agent": "^1.6.2",
+    "zod": "^4.0.0"
+  }
 }

@@ -8,6 +8,7 @@ from agent_settings import (
     ALLOWED_ACTIONS,
     DEFAULT_MESSAGE,
     DISALLOWED_RESPONSE_PATTERNS,
+    FORM_INTENT_KEYWORDS,
     GUIDE_INTENT_KEYWORDS,
     NAV_INTENT_KEYWORDS,
 )
@@ -95,13 +96,33 @@ def _build_navigation_message(route: str, routes: tuple[RouteEntry, ...]) -> str
     return f"正在跳转到 {target}。"
 
 
-def _normalize_action_object(raw: Any, routes: tuple[RouteEntry, ...]) -> dict[str, Any] | None:
+def _build_form_payload(user_message: str, current_page_info: str, raw: dict[str, Any] | None = None) -> dict[str, Any]:
+    params = raw.get("params") if isinstance(raw, dict) and isinstance(raw.get("params"), dict) else {}
+    raw_page_info = params.get("pageInfo") or raw.get("pageInfo") if isinstance(raw, dict) else ""
+    return {
+        "action": "form",
+        "params": {
+            "message": str(user_message or "").strip(),
+            "pageInfo": str(current_page_info or raw_page_info or ""),
+        },
+    }
+
+
+def _normalize_action_object(
+    raw: Any,
+    routes: tuple[RouteEntry, ...],
+    user_message: str,
+    current_page_info: str,
+) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
 
     action = str(raw.get("action") or "").strip()
     if action not in ALLOWED_ACTIONS:
         return None
+
+    if action == "form":
+        return _build_form_payload(user_message, current_page_info, raw)
 
     params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
     route = params.get("route") or params.get("path") or raw.get("route") or raw.get("path")
@@ -145,6 +166,20 @@ def _has_navigation_intent(user_message: str) -> bool:
     return True
 
 
+def _has_form_intent(user_message: str) -> bool:
+    text = str(user_message or "").strip()
+    text_lower = text.lower()
+    if not text_lower:
+        return False
+    if _has_navigation_intent(text_lower):
+        return False
+    if any(keyword in text_lower for keyword in GUIDE_INTENT_KEYWORDS):
+        return False
+    if any(marker in text for marker in ("?", "？")):
+        return False
+    return any(keyword in text for keyword in FORM_INTENT_KEYWORDS)
+
+
 def _infer_navigation_payload(user_message: str, pathname: str, routes: tuple[RouteEntry, ...]) -> dict[str, Any] | None:
     if not _has_navigation_intent(user_message):
         return None
@@ -166,10 +201,17 @@ def _infer_navigation_payload(user_message: str, pathname: str, routes: tuple[Ro
     }
 
 
-def normalize_model_output(raw_text: str, user_message: str, routes: tuple[RouteEntry, ...], pathname: str) -> dict[str, Any]:
+def normalize_model_output(
+    raw_text: str,
+    user_message: str,
+    routes: tuple[RouteEntry, ...],
+    pathname: str,
+    current_page_info: str = "",
+) -> dict[str, Any]:
     raw = strip_reasoning_text(raw_text)
     parsed = _try_parse_json_dict(raw)
     candidates: list[dict[str, Any]] = []
+    fallback_message = ""
 
     if isinstance(parsed, dict):
         candidates.append(parsed)
@@ -179,13 +221,19 @@ def normalize_model_output(raw_text: str, user_message: str, routes: tuple[Route
                 candidates.append(nested)
 
     for candidate in candidates:
-        action_payload = _normalize_action_object(candidate, routes)
+        action_payload = _normalize_action_object(candidate, routes, user_message, current_page_info)
         if action_payload is not None:
             return action_payload
 
         message = _extract_message_from_payload(candidate)
-        if message:
-            return {"message": message}
+        if message and not fallback_message:
+            fallback_message = message
+
+    if _has_form_intent(user_message):
+        return _build_form_payload(user_message, current_page_info)
+
+    if fallback_message:
+        return {"message": fallback_message}
 
     plain_message = normalize_plain_message(raw)
     if plain_message:
