@@ -30,15 +30,7 @@ def _iter_reference_dir_candidates():
     if explicit_skills_dir:
         yield explicit_skills_dir / "widget-knowledge-system" / "references"
 
-    default_skill_roots = (
-        PROJECT_ROOT / ".opencode" / "skills" / "widget-knowledge-system",
-        PROJECT_ROOT / "skills" / "widget-knowledge-system",
-        PROJECT_ROOT / ".codex" / "skills" / "widget-knowledge-system",
-        PROJECT_ROOT / ".claude" / "skills" / "widget-knowledge-system",
-    )
-    for skill_root in default_skill_roots:
-        yield skill_root / "references"
-
+    yield PROJECT_ROOT / "webAIDocs"
     yield PROJECT_ROOT / "knowledge"
 
 
@@ -55,7 +47,7 @@ def _resolve_references_dir() -> str:
     return str(PROJECT_ROOT / "knowledge")
 
 
-# 知识库目录：优先显式配置，其次自动探测常见 skill 目录，最后回退到 knowledge
+# 知识库目录：优先显式配置，其次使用项目根 webAIDocs，最后回退到 knowledge
 REFERENCES_DIR = _resolve_references_dir()
 
 # 路由表文件名（与 SKILL 一致）

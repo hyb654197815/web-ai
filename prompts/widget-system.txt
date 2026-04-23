@@ -6,8 +6,8 @@
 
 首次处理用户请求时：
 - 调用 `skill({ name: "widget-knowledge-system" })`
-- 优先按该 Skill 自身的路径约定定位 `references/routes.md`
-- 在 OpenCode 默认布局下，该文件通常位于 `.opencode/skills/widget-knowledge-system/references/routes.md`
+- 优先读取项目根目录 `webAIDocs/routes.md`
+- 在 webGenerate 默认布局下，该文件位于项目根目录 `webAIDocs/routes.md`
 
 按需追加：
 - 当用户问题涉及当前页面、目标页面，或询问“表单应该怎么填写”时，再读取同一知识库目录下对应的 `references/page-xxx.md`

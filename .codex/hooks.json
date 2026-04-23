@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "([ -f webAIDocs/routes.md ] || [ -f .codex/skills/widget-knowledge-system/references/routes.md ] || [ -f .claude/skills/widget-knowledge-system/references/routes.md ] || [ -f .opencode/skills/widget-knowledge-system/references/routes.md ] || [ -f .trae/skills/widget-knowledge-system/references/routes.md ] || [ -f .trae-cn/skills/widget-knowledge-system/references/routes.md ] || [ -f .ai/skills/widget-knowledge-system/references/routes.md ]) && echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"webGenerate: Knowledge docs exist. Read webAIDocs/routes.md before searching raw files.\"}}' || true"
+          }
+        ]
+      }
+    ]
+  }
+}

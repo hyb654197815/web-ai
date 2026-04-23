@@ -2,6 +2,27 @@
   "name": "portable-ai-agent-widget",
   "version": "1.0.0",
   "description": "便携式前端 AI Agent 入口 - 页面问答、路由跳转与表单操作",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hyb654197815/web-ai.git"
+  },
+  "homepage": "https://github.com/hyb654197815/web-ai#readme",
+  "bugs": {
+    "url": "https://github.com/hyb654197815/web-ai/issues"
+  },
+  "keywords": [
+    "ai-agent",
+    "widget",
+    "frontend",
+    "webgenerate",
+    "knowledge-base",
+    "copilot",
+    "codex"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "type": "module",
   "main": "./dist/agent-widget.js",
   "module": "./dist/agent-widget.js",
@@ -14,13 +35,23 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "ARCHITECTURE.md",
+    "PRINCIPLES.md",
+    "LICENSE",
+    "scripts",
+    "prompts",
+    "templates"
   ],
   "scripts": {
     "build": "vite build",
     "dev": "vite",
     "preview": "vite preview",
-    "gen-docs": "node scripts/generate-docs.js"
+    "webGenerate": "node scripts/webGenerate.js"
+  },
+  "bin": {
+    "portable-ai-agent-widget": "./scripts/webGenerate.js",
+    "webGenerate": "./scripts/webGenerate.js"
   },
   "devDependencies": {
     "vite": "^5.0.0"

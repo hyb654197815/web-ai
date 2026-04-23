@@ -41,6 +41,14 @@
 - `CORS_ORIGINS`
 - `PORT`
 
+知识库默认读取顺序：
+
+- `WIDGET_KNOWLEDGE_DIR`
+- `WIDGET_KNOWLEDGE_SKILL_DIR/references`
+- `WIDGET_SKILLS_DIR/widget-knowledge-system/references`
+- 项目根目录 `webAIDocs/`
+- 项目根目录 `knowledge/`
+
 可选调优项：
 
 - `AGENT_TEMPERATURE`
