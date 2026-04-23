@@ -1,6 +1,6 @@
 {
   "name": "portable-ai-agent-widget",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "便携式前端 AI Agent 入口 - 页面问答、路由跳转与表单操作",
   "license": "MIT",
   "repository": {
@@ -44,6 +44,10 @@
     "templates"
   ],
   "scripts": {
+    "readme:github": "node scripts/sync-readme.js github",
+    "readme:npm": "node scripts/sync-readme.js npm",
+    "prepack": "node scripts/sync-readme.js npm",
+    "postpack": "node scripts/sync-readme.js github",
     "build": "vite build",
     "dev": "vite",
     "preview": "vite preview",
@@ -51,7 +55,7 @@
   },
   "bin": {
     "portable-ai-agent-widget": "./scripts/webGenerate.js",
-    "webGenerate": "./scripts/webGenerate.js"
+    "webgenerate": "./scripts/webGenerate.js"
   },
   "devDependencies": {
     "vite": "^5.0.0"
