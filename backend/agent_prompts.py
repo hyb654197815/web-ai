@@ -47,30 +47,21 @@ def render_prompt_template(name: str, variables: dict[str, str]) -> str:
     return rendered.strip()
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(*, routes_doc: str) -> str:
     return render_prompt_template(
         "system",
         {
             "OUT_OF_SCOPE_MESSAGE": OUT_OF_SCOPE_MESSAGE,
+            "ROUTES_DOC": routes_doc,
         },
     )
 
 
-def build_user_prompt(
-    *,
-    current_page: str,
-    session_history_section: str,
-    routes_snapshot: str,
-    related_docs_section: str,
-    user_request: str,
-) -> str:
+def build_user_prompt(*, current_page: str, user_request: str) -> str:
     return render_prompt_template(
         "user",
         {
             "CURRENT_PAGE": current_page,
-            "SESSION_HISTORY_SECTION": session_history_section,
-            "ROUTES_SNAPSHOT": routes_snapshot,
-            "RELATED_DOCS_SECTION": related_docs_section,
             "USER_REQUEST": user_request,
         },
     )

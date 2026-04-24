@@ -24,14 +24,14 @@
 
 ## SSE 事件
 
-- `thinking`：中间推理摘要
+- `thinking`：ReAct 中间推理、工具调用与观察摘要
 - `final`：最终结果
 - `done`：流结束
 - `error`：异常信息
 
 ## 环境变量
 
-- `NVIDIA_API_KEY` 或 `OPENAI_API_KEY`
+- `OPENAI_API_KEY`
 - `OPENAI_API_BASE`
 - `OPENAI_MODEL_NAME`
 - `AGENT_PROMPTS_DIR`
@@ -52,25 +52,22 @@
 可选调优项：
 
 - `AGENT_TEMPERATURE`
-- `AGENT_MAX_ROUTE_LINES`
-- `AGENT_MAX_RELATED_DOCS`
-- `AGENT_MAX_DOC_CHARS`
+- `AGENT_MAX_RETRIES`
+- `AGENT_ROUTE_SEARCH_LIMIT`
+- `AGENT_MAX_PAGE_DOC_CHARS`
 - `AGENT_MAX_MESSAGE_CHARS`
-- `STREAM_THINKING_FLUSH_CHARS`
-- `STREAM_MAX_THINKING_EVENTS`
+- `STREAM_THINKING_SUMMARY_LIMIT`
+- `STREAM_MAX_TOOL_PREVIEW_CHARS`
 
 ## 代码结构
 
-- `agent.py`：编排层，只保留回合执行、重试策略与公开接口
-- `agent_settings.py`：运行时常量与环境变量读取
-- `agent_prompts.py`：提示词模板加载与变量渲染
-- `agent_context.py`：路由解析、相关文档筛选、用户上下文拼装
-- `agent_llm.py`：LangChain / OpenAI 兼容模型适配
-- `agent_output.py`：模型输出清洗、导航动作归一化、安全兜底
-- `prompts/agent-system.txt`：system prompt 模板
-- `prompts/agent-user.txt`：用户上下文 prompt 模板
-
-调整提示词时，优先修改 `backend/prompts/` 下的模板文件，而不是直接改 Python 代码。
+- `agent.py`：LangChain Agent 编排、stream 事件转换、最终 payload 抽取
+- `agent_tools.py`：`search_routes` / `get_page_doc` / `get_current_page_doc` 工具
+- `agent_context.py`：路由表解析、路径匹配、候选路由搜索
+- `agent_llm.py`：OpenAI 兼容 Chat Model 初始化
+- `agent_output.py`：模型最终文本/JSON 归一化为前端动作协议
+- `prompts/agent-system.txt`：system prompt 模板（含 routes.md）
+- `prompts/agent-user.txt`：user prompt 模板（含当前页面与用户请求）
 
 ## 运行
 

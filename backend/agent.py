@@ -1,114 +1,149 @@
 from collections.abc import Iterator
-from dataclasses import dataclass
+import json
 from typing import Any
 
-from agent_context import RouteEntry, build_prompt_context, doc_file_names
-from agent_llm import build_messages, invoke_model, stream_model_chunks
-from agent_output import normalize_model_output, payload_is_unresolved, strip_reasoning_text
-from agent_settings import (
-    DEFAULT_MESSAGE,
-    MODEL_DONE_SUMMARY_LIMIT,
-    STREAM_MAX_THINKING_EVENTS,
-    STREAM_THINKING_FLUSH_CHARS,
-    STREAM_THINKING_SUMMARY_LIMIT,
-    THINKING_SUMMARY_LIMIT,
-)
+from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
+
+from agent_context import get_current_page_doc, get_routes_doc, load_routes
+from agent_llm import create_llm
+from agent_output import extract_last_ai_message_text, message_to_text, normalize_model_output, sanitize_user_visible_text
+from agent_prompts import build_system_prompt, build_user_prompt
+from agent_settings import DEFAULT_MESSAGE, STREAM_MAX_TOOL_PREVIEW_CHARS, STREAM_THINKING_SUMMARY_LIMIT
 from agent_support import truncate
+from agent_tools import build_agent_tools
 
-
-@dataclass(frozen=True)
-class AgentRoundResult:
-    prompt: str
-    routes: tuple[RouteEntry, ...]
-    related_docs: tuple[tuple[str, str], ...]
-    current_page_doc: str
-    raw: str
-    payload: dict[str, Any]
+_CHECKPOINTER = InMemorySaver()
 
 
 def _thinking_event(stage: str, title: str, summary: str) -> dict[str, Any]:
-    limit = STREAM_THINKING_SUMMARY_LIMIT if stage == "model_stream" else THINKING_SUMMARY_LIMIT
     return {
         "type": "thinking",
         "stage": stage,
         "title": title,
-        "summary": truncate(summary, limit),
+        "summary": truncate(sanitize_user_visible_text(summary), STREAM_THINKING_SUMMARY_LIMIT),
     }
 
 
-def _execute_agent_round(
-    user_message: str,
-    pathname: str,
-    history: list[dict[str, str]] | None,
-    expand_scope: bool = False,
-) -> AgentRoundResult:
-    context = build_prompt_context(user_message, pathname, history, expand_scope=expand_scope)
-    messages = build_messages(context.prompt)
-    raw = invoke_model(messages, streaming=False)
-    payload = (
-        normalize_model_output(raw, user_message, context.routes, pathname, context.current_page_doc)
-        if raw
-        else {"message": DEFAULT_MESSAGE}
-    )
-    return AgentRoundResult(
-        prompt=context.prompt,
-        routes=context.routes,
-        related_docs=context.related_docs,
-        current_page_doc=context.current_page_doc,
-        raw=raw,
-        payload=payload,
-    )
+def _agent_inputs(user_message: str, pathname: str) -> dict[str, Any]:
+    return {
+        "messages": [
+            {
+                "role": "user",
+                "content": build_user_prompt(
+                    current_page=str(pathname or "/").strip() or "/",
+                    user_request=str(user_message or "").strip(),
+                ),
+            }
+        ]
+    }
 
 
-def _stream_agent_round(
-    user_message: str,
-    pathname: str,
-    history: list[dict[str, str]] | None,
-    expand_scope: bool = False,
-):
-    context = build_prompt_context(user_message, pathname, history, expand_scope=expand_scope)
-    yield _thinking_event(
-        "prepare_context",
-        "准备上下文",
-        f"已加载路由 {len(context.routes)} 条，关联页面文档 {len(context.related_docs)} 份。",
+def _agent_config(session_id: str) -> dict[str, Any]:
+    return {"configurable": {"thread_id": session_id}}
+
+
+def _build_agent(pathname: str, *, streaming: bool):
+    return create_agent(
+        model=create_llm(streaming=streaming),
+        tools=build_agent_tools(pathname=pathname),
+        system_prompt=build_system_prompt(routes_doc=get_routes_doc()),
+        checkpointer=_CHECKPOINTER,
+        name="frontend_site_agent",
     )
 
-    messages = build_messages(context.prompt)
-    all_parts: list[str] = []
-    buffer = ""
-    event_count = 0
-    overflow_notified = False
 
-    for chunk in stream_model_chunks(messages):
-        all_parts.append(chunk)
-        buffer += chunk
-        while len(buffer) >= STREAM_THINKING_FLUSH_CHARS:
-            piece = buffer[:STREAM_THINKING_FLUSH_CHARS]
-            buffer = buffer[STREAM_THINKING_FLUSH_CHARS:]
-            if not piece.strip():
-                continue
-            if event_count < STREAM_MAX_THINKING_EVENTS:
-                yield _thinking_event("model_stream", "模型输出", piece)
-                event_count += 1
-            elif not overflow_notified:
-                yield _thinking_event("model_stream", "模型输出", "中间流式片段较多，后续内容已省略展示。")
-                overflow_notified = True
+def _safe_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return str(value)
 
-    if buffer.strip() and event_count < STREAM_MAX_THINKING_EVENTS:
-        yield _thinking_event("model_stream", "模型输出", buffer)
 
-    raw = "".join(all_parts).strip() or invoke_model(messages, streaming=False)
-    yield _thinking_event("model_done", "模型完成", truncate(strip_reasoning_text(raw) or raw, MODEL_DONE_SUMMARY_LIMIT))
-    return AgentRoundResult(
-        prompt=context.prompt,
-        routes=context.routes,
-        related_docs=context.related_docs,
-        current_page_doc=context.current_page_doc,
-        raw=raw,
-        payload=normalize_model_output(raw, user_message, context.routes, pathname, context.current_page_doc)
-        if raw
-        else {"message": DEFAULT_MESSAGE},
-    )
+def _iter_messages(value: Any) -> Iterator[BaseMessage]:
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, BaseMessage):
+                yield item
+        return
+    if isinstance(value, BaseMessage):
+        yield value
+
+
+def _summarize_ai_message(message: AIMessage) -> tuple[str, str] | None:
+    tool_calls = getattr(message, "tool_calls", None) or []
+    if tool_calls:
+        tool_summaries = []
+        for tool_call in tool_calls:
+            name = str(tool_call.get("name") or "").strip() or "unknown_tool"
+            if name in {"get_page_doc", "get_current_page_doc"}:
+                tool_summaries.append("读取相关页面说明")
+            elif name == "search_routes":
+                tool_summaries.append("搜索候选页面")
+            else:
+                tool_summaries.append(name)
+        summary = "计划调用工具：" + "；".join(tool_summaries)
+        return ("action", summary)
+
+    text = message_to_text(message)
+    if text.strip():
+        sanitized = sanitize_user_visible_text(text.strip())
+        if sanitized:
+            return ("reason", f"形成阶段性判断：{truncate(sanitized, STREAM_MAX_TOOL_PREVIEW_CHARS)}")
+    return None
+
+
+def _summarize_tool_message(message: ToolMessage) -> str:
+    tool_name = getattr(message, "name", None) or "tool"
+    content = message_to_text(message).strip()
+
+    if tool_name in {"get_page_doc", "get_current_page_doc"}:
+        return f"{tool_name} 已返回相关页面说明。"
+
+    if tool_name == "search_routes":
+        count = len([line for line in content.splitlines() if line.strip().startswith("- ")])
+        if count:
+            return f"{tool_name} 已返回 {count} 个候选路由。"
+
+    preview = truncate(sanitize_user_visible_text(content or "工具已返回结果。"), STREAM_MAX_TOOL_PREVIEW_CHARS)
+    return f"{tool_name} 返回：{preview}"
+
+
+def _handle_update_payload(payload: Any) -> Iterator[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return
+
+    for node_name, node_payload in payload.items():
+        for message in _iter_messages(node_payload.get("messages") if isinstance(node_payload, dict) else None):
+            if isinstance(message, AIMessage):
+                summary = _summarize_ai_message(message)
+                if not summary:
+                    continue
+                stage, text = summary
+                yield _thinking_event(stage, "模型推理", text)
+            elif isinstance(message, ToolMessage):
+                yield _thinking_event("observation", "工具观察", _summarize_tool_message(message))
+        if isinstance(node_payload, dict) and node_payload.get("structured_response") is not None:
+            yield _thinking_event(
+                "reason",
+                "结构化输出",
+                truncate(sanitize_user_visible_text(_safe_json(node_payload.get("structured_response"))), STREAM_MAX_TOOL_PREVIEW_CHARS),
+            )
+
+
+def _current_page_info(pathname: str) -> str:
+    _, doc = get_current_page_doc(pathname)
+    return doc
+
+
+def _extract_payload_from_state(state: dict[str, Any], user_message: str, pathname: str) -> dict[str, Any]:
+    routes = load_routes()
+    current_page_info = _current_page_info(pathname)
+    raw_text = extract_last_ai_message_text(state.get("messages"))
+    if not raw_text and isinstance(state.get("structured_response"), dict):
+        raw_text = _safe_json(state.get("structured_response"))
+    return normalize_model_output(raw_text, user_message, routes, current_page_info=current_page_info)
 
 
 def _error_message_for_exception(exc: Exception) -> str:
@@ -118,26 +153,42 @@ def _error_message_for_exception(exc: Exception) -> str:
 
 def stream_agent_events(
     user_message: str,
+    *,
     pathname: str = "/",
-    history: list[dict[str, str]] | None = None,
+    session_id: str,
 ) -> Iterator[dict[str, Any]]:
     try:
-        yield _thinking_event("pending", "正在处理", "正在准备上下文...")
-        first_round = yield from _stream_agent_round(user_message, pathname, history, expand_scope=False)
+        routes = load_routes()
+        current_route, _ = get_current_page_doc(pathname)
+        yield _thinking_event(
+            "pending",
+            "准备上下文",
+            f"已加载路由清单（{len(routes)} 条路由），当前页面是 {current_route.path if current_route else pathname}。",
+        )
 
-        payload = first_round.payload
-        related_docs = first_round.related_docs
+        agent = _build_agent(pathname, streaming=True)
+        last_state: dict[str, Any] = {}
 
-        if payload_is_unresolved(payload):
-            yield _thinking_event("retry_start", "扩展检索重试", "首轮结果不充分，尝试扩大页面文档范围后重试。")
-            retry_round = yield from _stream_agent_round(user_message, pathname, history, expand_scope=True)
-            retry_docs = retry_round.related_docs
-            if len(retry_docs) > len(related_docs) or doc_file_names(retry_docs) != doc_file_names(related_docs):
-                retry_payload = retry_round.payload
-                if not payload_is_unresolved(retry_payload):
-                    payload = retry_payload
-            yield _thinking_event("retry_done", "重试完成", "扩展文档后的重试已完成。")
+        for mode, data in agent.stream(
+            _agent_inputs(user_message, pathname),
+            _agent_config(session_id),
+            stream_mode=["updates", "custom", "values"],
+        ):
+            if mode == "updates":
+                yield from _handle_update_payload(data)
+                continue
+            if mode == "custom":
+                if isinstance(data, dict):
+                    stage = str(data.get("stage") or "tool")
+                    title = str(data.get("title") or "工具调用")
+                    summary = str(data.get("summary") or "").strip()
+                    if summary:
+                        yield _thinking_event(stage, title, summary)
+                continue
+            if mode == "values" and isinstance(data, dict):
+                last_state = data
 
+        payload = _extract_payload_from_state(last_state, user_message, pathname)
         yield {"type": "final", "payload": payload}
     except Exception as exc:
         yield {"type": "error", "message": _error_message_for_exception(exc)}
@@ -146,23 +197,16 @@ def stream_agent_events(
 
 def run_agent(
     user_message: str,
+    *,
     pathname: str = "/",
-    history: list[dict[str, str]] | None = None,
+    session_id: str,
 ) -> dict[str, Any]:
     try:
-        resolved = _execute_agent_round(user_message, pathname, history, expand_scope=False)
-        payload = resolved.payload
-        related_docs = resolved.related_docs
-
-        if payload_is_unresolved(payload):
-            retry_resolved = _execute_agent_round(user_message, pathname, history, expand_scope=True)
-            retry_docs = retry_resolved.related_docs
-            if len(retry_docs) > len(related_docs) or doc_file_names(retry_docs) != doc_file_names(related_docs):
-                retry_payload = retry_resolved.payload
-                if not payload_is_unresolved(retry_payload):
-                    return retry_payload
-
-        return payload
+        final_payload: dict[str, Any] | None = None
+        for event in stream_agent_events(user_message, pathname=pathname, session_id=session_id):
+            if event.get("type") == "final" and isinstance(event.get("payload"), dict):
+                final_payload = event["payload"]
+        return final_payload or {"message": DEFAULT_MESSAGE}
     except Exception as exc:
         message = _error_message_for_exception(exc)
         return {"message": message if "Missing" in message or "missing" in message else DEFAULT_MESSAGE}

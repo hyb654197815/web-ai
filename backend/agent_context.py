@@ -2,17 +2,8 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 
-from agent_prompts import build_user_prompt as render_user_prompt
-from agent_settings import (
-    AGENT_HISTORY_ITEM_CHARS,
-    AGENT_MAX_DOC_CHARS,
-    AGENT_MAX_HISTORY_LINES,
-    AGENT_MAX_RELATED_DOCS,
-    AGENT_MAX_ROUTE_LINES,
-    EXPANDED_SCOPE_EXTRA_DOCS,
-)
-from agent_support import truncate
-from tools import list_page_docs, read_page_doc, read_routes_doc
+from agent_settings import AGENT_ROUTE_SEARCH_LIMIT
+from tools import read_page_doc, read_routes_doc
 
 
 @dataclass(frozen=True)
@@ -24,14 +15,6 @@ class RouteEntry:
     is_dynamic: bool
 
 
-@dataclass(frozen=True)
-class PromptContext:
-    prompt: str
-    routes: tuple[RouteEntry, ...]
-    related_docs: tuple[tuple[str, str], ...]
-    current_page_doc: str
-
-
 def _clean_filename(filename: str) -> str:
     candidate = str(filename or "").strip().replace("\\", "/").split("/")[-1]
     if not candidate.endswith(".md") or ".." in candidate:
@@ -41,9 +24,11 @@ def _clean_filename(filename: str) -> str:
 
 def _split_table_row(line: str) -> list[str]:
     text = line.strip()
-    if not text.startswith("|") or "|" not in text[1:]:
+    if "|" not in text:
         return []
-    return [cell.strip() for cell in text.strip("|").split("|")]
+    if text.startswith("|"):
+        text = text.strip("|")
+    return [cell.strip() for cell in text.split("|")]
 
 
 def _is_separator_row(cells: list[str]) -> bool:
@@ -140,8 +125,13 @@ def _match_dynamic_route(pattern: str, pathname: str) -> bool:
 
 
 @lru_cache(maxsize=1)
+def get_routes_doc() -> str:
+    return read_routes_doc()
+
+
+@lru_cache(maxsize=1)
 def load_routes() -> tuple[RouteEntry, ...]:
-    routes_doc = read_routes_doc()
+    routes_doc = get_routes_doc()
     routes: list[RouteEntry] = []
 
     for headers, rows in _parse_markdown_tables(routes_doc):
@@ -165,13 +155,18 @@ def load_routes() -> tuple[RouteEntry, ...]:
     return tuple(routes)
 
 
-def find_current_route(pathname: str, routes: tuple[RouteEntry, ...]) -> RouteEntry | None:
+def format_route_entry(route: RouteEntry) -> str:
+    return f"{route.path} | {route.title or '-'} | {route.doc_file or '-'}"
+
+
+def find_current_route(pathname: str, routes: tuple[RouteEntry, ...] | None = None) -> RouteEntry | None:
+    available_routes = routes or load_routes()
     current_path = str(pathname or "/").strip() or "/"
-    for route in routes:
+    for route in available_routes:
         if route.path == current_path:
             return route
 
-    dynamic_routes = [route for route in routes if route.is_dynamic and _match_dynamic_route(route.path, current_path)]
+    dynamic_routes = [route for route in available_routes if route.is_dynamic and _match_dynamic_route(route.path, current_path)]
     return max(
         dynamic_routes,
         key=lambda item: len([segment for segment in item.path.split("/") if segment and not segment.startswith(":")]),
@@ -179,120 +174,64 @@ def find_current_route(pathname: str, routes: tuple[RouteEntry, ...]) -> RouteEn
     )
 
 
-def score_route(route: RouteEntry, user_text_lower: str, pathname: str) -> int:
-    score = 25 if route.path == pathname else 12 if route.is_dynamic and _match_dynamic_route(route.path, pathname) else 0
-    if route.path.lower() in user_text_lower:
+def score_route(route: RouteEntry, query_text: str, pathname: str = "/") -> int:
+    text = str(query_text or "").lower()
+    current_path = str(pathname or "/").strip() or "/"
+
+    score = 25 if route.path == current_path else 12 if route.is_dynamic and _match_dynamic_route(route.path, current_path) else 0
+    if route.path.lower() in text:
         score += 18
-    if route.title and route.title.lower() in user_text_lower:
+    if route.title and route.title.lower() in text:
         score += 12
-    if route.doc_file and route.doc_file.lower().replace(".md", "") in user_text_lower:
+    if route.doc_file and route.doc_file.lower().replace(".md", "") in text:
         score += 8
-    score += sum(1 for keyword in route.keywords[:6] if len(keyword) >= 2 and keyword in user_text_lower) * 2
+    score += sum(1 for keyword in route.keywords[:8] if len(keyword) >= 2 and keyword in text) * 2
     return score
 
 
-def select_related_docs(
-    user_message: str,
-    pathname: str,
-    routes: tuple[RouteEntry, ...],
-    expand_scope: bool = False,
-) -> tuple[tuple[str, str], ...]:
-    user_lower = str(user_message or "").lower()
-    current_path = str(pathname or "/").strip() or "/"
-    ranked: list[tuple[int, str]] = []
-    seen: set[str] = set()
-
-    current_route = find_current_route(current_path, routes)
-    if current_route and current_route.doc_file:
-        ranked.append((999, current_route.doc_file))
-        seen.add(current_route.doc_file)
-
-    for route in routes:
-        if not route.doc_file or route.doc_file in seen:
-            continue
-        score = score_route(route, user_lower, current_path)
-        if score <= 0 and not expand_scope:
-            continue
-        ranked.append((max(score, 1), route.doc_file))
-        seen.add(route.doc_file)
-
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    limit = max(1, AGENT_MAX_RELATED_DOCS + EXPANDED_SCOPE_EXTRA_DOCS) if expand_scope else max(1, AGENT_MAX_RELATED_DOCS)
-
-    selected: list[tuple[str, str]] = []
-    for _, doc_file in ranked:
-        if len(selected) >= limit:
-            break
-        content = read_page_doc(doc_file)
-        if content.strip():
-            selected.append((doc_file, truncate(content, AGENT_MAX_DOC_CHARS)))
-
-    if expand_scope and len(selected) < limit:
-        for doc_file in list_page_docs():
-            if any(existing == doc_file for existing, _ in selected):
-                continue
-            content = read_page_doc(doc_file)
-            if content.strip():
-                selected.append((doc_file, truncate(content, AGENT_MAX_DOC_CHARS)))
-            if len(selected) >= limit:
-                break
-
+def search_routes(query: str, pathname: str = "/", limit: int = AGENT_ROUTE_SEARCH_LIMIT) -> tuple[RouteEntry, ...]:
+    routes = load_routes()
+    ranked = sorted(
+        ((route, score_route(route, query, pathname=pathname)) for route in routes),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    selected = [route for route, score in ranked if score > 0][: max(1, limit)]
     return tuple(selected)
 
 
-def format_routes_snapshot(routes: tuple[RouteEntry, ...]) -> str:
-    if not routes:
-        return "无路由数据"
-    return "\n".join(
-        f"- {route.path} | {route.title or '-'} | {route.doc_file or '-'}"
-        for route in routes[: max(1, AGENT_MAX_ROUTE_LINES)]
-    )
+def resolve_route_reference(reference: str, pathname: str = "/", routes: tuple[RouteEntry, ...] | None = None) -> RouteEntry | None:
+    available_routes = routes or load_routes()
+    raw = str(reference or "").strip()
+    if not raw or raw.lower() in {"current", "current_page", "current-route", "当前页", "当前页面"}:
+        return find_current_route(pathname, available_routes)
+
+    normalized = raw.replace("\\", "/").strip()
+    if normalized.endswith(".md"):
+        safe_doc = _clean_filename(normalized)
+        return next((route for route in available_routes if route.doc_file == safe_doc), None)
+
+    exact_route = next((route for route in available_routes if route.path == normalized), None)
+    if exact_route:
+        return exact_route
+
+    if normalized.startswith("/"):
+        return find_current_route(normalized, available_routes)
+
+    lowered = normalized.lower()
+    exact_title_matches = [route for route in available_routes if route.title.lower() == lowered]
+    if len(exact_title_matches) == 1:
+        return exact_title_matches[0]
+
+    exact_doc_matches = [route for route in available_routes if route.doc_file.lower().replace(".md", "") == lowered]
+    if len(exact_doc_matches) == 1:
+        return exact_doc_matches[0]
+
+    return None
 
 
-def format_history(history: list[dict[str, str]] | None) -> str:
-    if not history:
-        return ""
-
-    lines: list[str] = []
-    for item in history[-AGENT_MAX_HISTORY_LINES :]:
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role") or "user").strip().lower()
-        if role not in {"user", "assistant"}:
-            role = "user"
-        content = truncate(str(item.get("content") or ""), AGENT_HISTORY_ITEM_CHARS)
-        if content:
-            lines.append(f"{role}: {content}")
-    return "\n".join(lines)
-
-
-def format_related_docs_section(related_docs: tuple[tuple[str, str], ...]) -> str:
-    if not related_docs:
-        return "[相关页面文档]\n无"
-    return "\n\n".join(f"[相关页面文档 #{idx}] {name}\n{content}" for idx, (name, content) in enumerate(related_docs, start=1))
-
-
-def doc_file_names(docs: tuple[tuple[str, str], ...]) -> tuple[str, ...]:
-    return tuple(name for name, _ in docs)
-
-
-def build_prompt_context(
-    user_message: str,
-    pathname: str,
-    history: list[dict[str, str]] | None,
-    expand_scope: bool = False,
-) -> PromptContext:
-    routes = load_routes()
-    current_route = find_current_route(pathname, routes)
-    current_page_doc = read_page_doc(current_route.doc_file) if current_route and current_route.doc_file else ""
-    related_docs = select_related_docs(user_message, pathname, routes, expand_scope=expand_scope)
-    history_text = format_history(history)
-    history_section = f"[会话历史]\n{history_text}\n\n" if history_text else ""
-    prompt = render_user_prompt(
-        current_page=str(pathname or "/").strip() or "/",
-        session_history_section=history_section,
-        routes_snapshot=format_routes_snapshot(routes),
-        related_docs_section=format_related_docs_section(related_docs),
-        user_request=str(user_message or "").strip(),
-    )
-    return PromptContext(prompt=prompt, routes=routes, related_docs=related_docs, current_page_doc=current_page_doc)
+def get_current_page_doc(pathname: str) -> tuple[RouteEntry | None, str]:
+    route = find_current_route(pathname)
+    if not route or not route.doc_file:
+        return route, ""
+    return route, read_page_doc(route.doc_file)

@@ -1,7 +1,6 @@
-# LangChain 后端 REST API：与前端 Agent 对接
+# LangChain Agent backend REST API：与前端 Agent 对接
 import json
 import os
-import threading
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -15,13 +14,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent_runtime import DEFAULT_MESSAGE, run_agent, stream_agent_events
-from agent_settings import ALLOWED_ACTIONS
+from agent_runtime import run_agent, stream_agent_events
 from config import CORS_ORIGINS, MODEL_NAME, NVIDIA_API_KEY, NVIDIA_BASE_URL, PORT, REFERENCES_DIR
 
 app = FastAPI(
     title="便携式前端 AI Agent 后端",
-    description="基于 LangChain 的前端站点 Agent 服务，支持路由跳转、站内问答与页面表单操作。",
+    description="基于 LangChain Agent 的前端站点 Agent 服务，支持路由跳转、站内问答与页面表单操作。",
 )
 
 app.add_middleware(
@@ -43,23 +41,6 @@ class SessionMessageRequest(BaseModel):
     message: str | None = Field(None, max_length=2000, description="用户输入，可选")
     parts: list[dict] | None = Field(None, description="兼容 OpenCode 格式的消息片段")
     context: dict | None = Field(None, description="上下文，如 pathname")
-
-
-class ChatResponse(BaseModel):
-    action: str | None = None
-    params: dict | None = None
-    message: str = ""
-    sessionId: str | None = None
-
-
-MAX_SESSION_HISTORY = 24
-_SESSION_LOCK = threading.Lock()
-_SESSION_HISTORY: dict[str, list[dict[str, str]]] = {}
-
-
-@app.get("/api/health")
-def health():
-    return {"status": "ok", "knowledge_dir": REFERENCES_DIR}
 
 
 def _page_agent_llm_enabled() -> bool:
@@ -86,13 +67,17 @@ def _build_proxy_request_body(raw_body: bytes) -> bytes:
 
 
 def _build_page_agent_proxy_headers() -> dict[str, str]:
-    # Some upstream OpenAI-compatible gateways block urllib's default User-Agent.
     return {
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Authorization": f"Bearer {NVIDIA_API_KEY}",
         "User-Agent": "OpenAI/Python 1.0",
     }
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "knowledge_dir": REFERENCES_DIR}
 
 
 @app.get("/api/page-agent/config")
@@ -194,40 +179,13 @@ def _resolve_or_create_session_id(session_id: str | None) -> str:
     return uuid.uuid4().hex
 
 
-def _get_session_history_snapshot(session_id: str) -> list[dict[str, str]]:
-    with _SESSION_LOCK:
-        return list(_SESSION_HISTORY.get(session_id, []))
-
-
-def _record_session_turn(session_id: str, user_message: str, assistant_payload: dict[str, Any]) -> None:
-    normalized_user = str(user_message or "").strip()
-    if not normalized_user:
-        return
-
-    if assistant_payload.get("action") in ALLOWED_ACTIONS:
-        try:
-            assistant_message = json.dumps(assistant_payload, ensure_ascii=False)
-        except TypeError:
-            assistant_message = str(assistant_payload)
-    else:
-        assistant_message = str(assistant_payload.get("message") or DEFAULT_MESSAGE).strip() or DEFAULT_MESSAGE
-
-    with _SESSION_LOCK:
-        history = _SESSION_HISTORY.setdefault(session_id, [])
-        history.append({"role": "user", "content": normalized_user})
-        history.append({"role": "assistant", "content": assistant_message})
-        if len(history) > MAX_SESSION_HISTORY:
-            del history[:-MAX_SESSION_HISTORY]
-
-
 def _encode_sse(event_name: str, payload: dict[str, Any]) -> str:
     data = json.dumps(payload, ensure_ascii=False)
     return f"event: {event_name}\ndata: {data}\n\n"
 
 
-def _stream_chat_events(body: ChatRequest, pathname: str, session_id: str, history: list[dict[str, str]]) -> Iterator[str]:
-    event_iter = stream_agent_events(body.message, pathname=pathname, history=history)
-    recorded = False
+def _stream_chat_events(body: ChatRequest, pathname: str, session_id: str) -> Iterator[str]:
+    event_iter = stream_agent_events(body.message, pathname=pathname, session_id=session_id)
 
     try:
         for event in event_iter:
@@ -237,9 +195,6 @@ def _stream_chat_events(body: ChatRequest, pathname: str, session_id: str, histo
 
             if event_name == "final" and isinstance(payload.get("payload"), dict):
                 payload["payload"]["sessionId"] = session_id
-                if not recorded:
-                    _record_session_turn(session_id, body.message, payload["payload"])
-                    recorded = True
 
             yield _encode_sse(event_name, payload)
     except GeneratorExit:
@@ -254,14 +209,9 @@ def _stream_chat_events(body: ChatRequest, pathname: str, session_id: str, histo
     yield _encode_sse("done", {"ok": True, "sessionId": session_id})
 
 
-def _build_streaming_response(
-    body: ChatRequest,
-    pathname: str,
-    session_id: str,
-    history: list[dict[str, str]],
-) -> StreamingResponse:
+def _build_streaming_response(body: ChatRequest, pathname: str, session_id: str) -> StreamingResponse:
     return StreamingResponse(
-        _stream_chat_events(body, pathname, session_id=session_id, history=history),
+        _stream_chat_events(body, pathname, session_id=session_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -275,14 +225,12 @@ def _build_streaming_response(
 def chat(body: ChatRequest, stream: bool = Query(False, description="是否启用 SSE 流式输出")) -> Any:
     pathname = _resolve_pathname(body)
     session_id = _resolve_or_create_session_id(body.sessionId)
-    history = _get_session_history_snapshot(session_id)
 
     if stream:
-        return _build_streaming_response(body, pathname, session_id=session_id, history=history)
+        return _build_streaming_response(body, pathname, session_id=session_id)
 
-    result = run_agent(body.message, pathname=pathname, history=history)
+    result = run_agent(body.message, pathname=pathname, session_id=session_id)
     result["sessionId"] = session_id
-    _record_session_turn(session_id, body.message, result)
     return result
 
 
@@ -315,15 +263,12 @@ async def page_agent_chat_completions(request: Request) -> Response:
 def chat_stream(body: ChatRequest) -> StreamingResponse:
     pathname = _resolve_pathname(body)
     session_id = _resolve_or_create_session_id(body.sessionId)
-    history = _get_session_history_snapshot(session_id)
-    return _build_streaming_response(body, pathname, session_id=session_id, history=history)
+    return _build_streaming_response(body, pathname, session_id=session_id)
 
 
 @app.post("/api/session", response_model=None)
 def create_session() -> dict[str, str]:
     session_id = _resolve_or_create_session_id(None)
-    with _SESSION_LOCK:
-        _SESSION_HISTORY.setdefault(session_id, [])
     return {"id": session_id, "sessionId": session_id}
 
 
@@ -336,14 +281,12 @@ def session_message(
     message = _resolve_message_or_raise(body.message, body.parts)
     chat_body = ChatRequest(message=message, sessionId=session_id, context=body.context)
     pathname = _resolve_pathname(chat_body)
-    history = _get_session_history_snapshot(session_id)
 
     if stream:
-        return _build_streaming_response(chat_body, pathname, session_id=session_id, history=history)
+        return _build_streaming_response(chat_body, pathname, session_id=session_id)
 
-    result = run_agent(message, pathname=pathname, history=history)
+    result = run_agent(message, pathname=pathname, session_id=session_id)
     result["sessionId"] = session_id
-    _record_session_turn(session_id, message, result)
     return result
 
 

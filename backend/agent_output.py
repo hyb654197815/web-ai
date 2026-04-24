@@ -2,17 +2,60 @@ import json
 import re
 from typing import Any
 
-from agent_context import RouteEntry, score_route
-from agent_settings import (
-    AGENT_MAX_MESSAGE_CHARS,
-    ALLOWED_ACTIONS,
-    DEFAULT_MESSAGE,
-    DISALLOWED_RESPONSE_PATTERNS,
-    FORM_INTENT_KEYWORDS,
-    GUIDE_INTENT_KEYWORDS,
-    NAV_INTENT_KEYWORDS,
-)
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+
+from agent_context import RouteEntry
+from agent_settings import AGENT_MAX_MESSAGE_CHARS, ALLOWED_ACTIONS, DEFAULT_MESSAGE, DISALLOWED_RESPONSE_PATTERNS, FORM_INTENT_KEYWORDS, GUIDE_INTENT_KEYWORDS, NAV_INTENT_KEYWORDS
 from agent_support import truncate
+
+SENSITIVE_SENTENCE_PATTERNS = (
+    re.compile(r"[^。！？\n]*(组件文件|源码中|源码里|接口文件|sourceFiles|doc_file)[^。！？\n]*[。！？]?", flags=re.IGNORECASE),
+    re.compile(r"[^。！？\n]*(src/|src\\|@/|page-[A-Za-z0-9._-]+\.md|routes\.md)[^。！？\n]*[。！？]?", flags=re.IGNORECASE),
+)
+SENSITIVE_INLINE_PATTERNS = (
+    re.compile(r"`?(?:routes\.md|page-[A-Za-z0-9._-]+\.md)`?", flags=re.IGNORECASE),
+    re.compile(r"`?(?:src[\\/][^`\s，。；,;)]*|@/[^\s`，。；,;)]*)`?", flags=re.IGNORECASE),
+    re.compile(r"`?[A-Za-z0-9_./\\-]+\.(?:vue|js|ts|tsx|jsx|py|json|md)`?", flags=re.IGNORECASE),
+)
+
+
+def content_to_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                if item.get("type") in {"text", "output_text", "reasoning"} and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                    continue
+                if isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+                    continue
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+        return "".join(parts)
+    return str(content)
+
+
+def message_to_text(message: BaseMessage | AIMessageChunk | Any) -> str:
+    return content_to_text(getattr(message, "content", message))
+
+
+def strip_reasoning_text(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    if not text:
+        return ""
+
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"^\s*思考[:：].*$", "", text, flags=re.MULTILINE).strip()
+    return text
 
 
 def _try_parse_json_dict(text: str) -> dict[str, Any] | None:
@@ -44,16 +87,6 @@ def _try_parse_json_dict(text: str) -> dict[str, Any] | None:
     return None
 
 
-def strip_reasoning_text(raw_text: str) -> str:
-    text = str(raw_text or "").strip()
-    if not text:
-        return ""
-
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
-    text = re.sub(r"^\s*思考[:：].*$", "", text, flags=re.MULTILINE).strip()
-    return text
-
-
 def normalize_plain_message(value: Any) -> str:
     text = strip_reasoning_text(str(value or "")).strip()
     if not text:
@@ -67,7 +100,38 @@ def normalize_plain_message(value: Any) -> str:
     if any(pattern.search(text) for pattern in DISALLOWED_RESPONSE_PATTERNS):
         return ""
 
+    text = sanitize_user_visible_text(text)
     return truncate(text, AGENT_MAX_MESSAGE_CHARS)
+
+
+def sanitize_user_visible_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    text = re.sub(r"```[\s\S]*?```", "", text).strip()
+
+    for pattern in SENSITIVE_SENTENCE_PATTERNS:
+        text = pattern.sub("", text)
+
+    for pattern in SENSITIVE_INLINE_PATTERNS:
+        text = pattern.sub("相关页面信息", text)
+
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"([。！？]){2,}", r"\1", text)
+    return text.strip()
+
+
+def extract_last_ai_message_text(messages: list[Any] | None) -> str:
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if isinstance(message, AIMessage):
+            text = normalize_plain_message(message_to_text(message))
+            if text:
+                return text
+    return ""
 
 
 def _is_safe_route(route: Any) -> bool:
@@ -180,32 +244,10 @@ def _has_form_intent(user_message: str) -> bool:
     return any(keyword in text for keyword in FORM_INTENT_KEYWORDS)
 
 
-def _infer_navigation_payload(user_message: str, pathname: str, routes: tuple[RouteEntry, ...]) -> dict[str, Any] | None:
-    if not _has_navigation_intent(user_message):
-        return None
-
-    user_lower = str(user_message or "").lower()
-    current_path = str(pathname or "/").strip() or "/"
-    ranked = sorted(((route, score_route(route, user_lower, current_path)) for route in routes), key=lambda item: item[1], reverse=True)
-    if not ranked:
-        return None
-
-    best_route, score = ranked[0]
-    if score < 12:
-        return None
-
-    return {
-        "action": "navigate",
-        "params": {"route": best_route.path},
-        "message": _build_navigation_message(best_route.path, routes),
-    }
-
-
 def normalize_model_output(
     raw_text: str,
     user_message: str,
     routes: tuple[RouteEntry, ...],
-    pathname: str,
     current_page_info: str = "",
 ) -> dict[str, Any]:
     raw = strip_reasoning_text(raw_text)
@@ -229,9 +271,6 @@ def normalize_model_output(
         if message and not fallback_message:
             fallback_message = message
 
-    if _has_form_intent(user_message):
-        return _build_form_payload(user_message, current_page_info)
-
     if fallback_message:
         return {"message": fallback_message}
 
@@ -239,16 +278,7 @@ def normalize_model_output(
     if plain_message:
         return {"message": plain_message}
 
-    heuristic_navigation = _infer_navigation_payload(user_message, pathname, routes)
-    if heuristic_navigation is not None:
-        return heuristic_navigation
+    if _has_form_intent(user_message):
+        return _build_form_payload(user_message, current_page_info)
 
     return {"message": DEFAULT_MESSAGE}
-
-
-def payload_is_unresolved(payload: dict[str, Any]) -> bool:
-    if payload.get("action") in ALLOWED_ACTIONS:
-        return False
-
-    message = str(payload.get("message") or "").strip()
-    return (not message) or any(marker in message for marker in (DEFAULT_MESSAGE, "信息不足", "无法准确", "未提供"))
