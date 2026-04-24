@@ -75,6 +75,146 @@ def _build_page_agent_proxy_headers() -> dict[str, str]:
     }
 
 
+def _is_plain_object(value: Any) -> bool:
+    return isinstance(value, dict)
+
+
+def _is_page_agent_macro_payload(value: Any) -> bool:
+    return _is_plain_object(value) and (
+        isinstance(value.get("action"), dict)
+        or isinstance(value.get("evaluation_previous_goal"), str)
+        or isinstance(value.get("memory"), str)
+        or isinstance(value.get("next_goal"), str)
+    )
+
+
+def _extract_json_object_segments(text: str) -> list[dict[str, Any]]:
+    source = str(text or "").strip()
+    if not source:
+        return []
+
+    decoder = json.JSONDecoder()
+    segments: list[dict[str, Any]] = []
+    index = 0
+    length = len(source)
+
+    while index < length:
+        while index < length and source[index].isspace():
+            index += 1
+        if index >= length:
+            break
+        if source[index] != "{":
+            next_index = source.find("{", index + 1)
+            if next_index < 0:
+                break
+            index = next_index
+            continue
+        try:
+            parsed, end = decoder.raw_decode(source, index)
+        except Exception:
+            next_index = source.find("{", index + 1)
+            if next_index < 0:
+                break
+            index = next_index
+            continue
+        if isinstance(parsed, dict):
+            segments.append(parsed)
+        index = end
+
+    return segments
+
+
+def _normalize_page_agent_json_text(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+
+    source = value.strip()
+    if not source:
+        return value
+
+    for _ in range(2):
+        try:
+            parsed = json.loads(source)
+        except Exception:
+            break
+        if isinstance(parsed, dict):
+            return json.dumps(parsed, ensure_ascii=False)
+        if isinstance(parsed, str) and parsed.strip() and parsed.strip() != source:
+            source = parsed.strip()
+            continue
+        break
+
+    segments = _extract_json_object_segments(source)
+    if not segments:
+        return value
+
+    fallback: dict[str, Any] | None = None
+    for segment in segments:
+        if _is_page_agent_macro_payload(segment):
+            return json.dumps(segment, ensure_ascii=False)
+        if fallback is None or bool(segment):
+            fallback = segment
+
+    if fallback is not None:
+        return json.dumps(fallback, ensure_ascii=False)
+    return value
+
+
+def _repair_page_agent_response_payload(payload: Any) -> tuple[Any, bool]:
+    if not (_is_plain_object(payload) and isinstance(payload.get("choices"), list)):
+        return payload, False
+
+    changed = False
+    for choice in payload["choices"]:
+        if not (_is_plain_object(choice) and _is_plain_object(choice.get("message"))):
+            continue
+        message = choice["message"]
+
+        content = message.get("content")
+        if isinstance(content, str):
+            normalized_content = _normalize_page_agent_json_text(content)
+            if normalized_content != content:
+                message["content"] = normalized_content
+                changed = True
+
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+
+        for tool_call in tool_calls:
+            if not _is_plain_object(tool_call):
+                continue
+            function = tool_call.get("function")
+            if not _is_plain_object(function):
+                continue
+            arguments = function.get("arguments")
+            if not isinstance(arguments, str):
+                continue
+
+            normalized_arguments = _normalize_page_agent_json_text(arguments)
+            if normalized_arguments != arguments:
+                function["arguments"] = normalized_arguments
+                changed = True
+
+    return payload, changed
+
+
+def _normalize_page_agent_proxy_response(content: bytes, content_type: str) -> bytes:
+    if "application/json" not in str(content_type or "").lower():
+        return content
+
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except Exception:
+        return content
+
+    repaired_payload, changed = _repair_page_agent_response_payload(payload)
+    if not changed:
+        return content
+
+    return json.dumps(repaired_payload, ensure_ascii=False).encode("utf-8")
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "knowledge_dir": REFERENCES_DIR}
@@ -250,10 +390,12 @@ async def page_agent_chat_completions(request: Request) -> Response:
         with urlopen(upstream_request, timeout=120) as upstream_response:
             content = upstream_response.read()
             content_type = upstream_response.headers.get("Content-Type", "application/json")
+            content = _normalize_page_agent_proxy_response(content, content_type)
             return Response(content=content, status_code=upstream_response.status, media_type=content_type.split(";")[0])
     except HTTPError as exc:
         content = exc.read()
         content_type = exc.headers.get("Content-Type", "application/json") if exc.headers else "application/json"
+        content = _normalize_page_agent_proxy_response(content, content_type)
         return Response(content=content, status_code=exc.code, media_type=content_type.split(";")[0])
     except URLError as exc:
         raise HTTPException(status_code=502, detail=f"Upstream LLM request failed: {exc.reason}") from exc

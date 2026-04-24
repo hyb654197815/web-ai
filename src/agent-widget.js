@@ -421,6 +421,173 @@ function tryParseJSON(text) {
   }
 }
 
+function extractJSONObjectSegments(text) {
+  if (typeof text !== 'string') return [];
+
+  const source = text.trim();
+  if (!source) return [];
+
+  const segments = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+
+    if (char === '}') {
+      if (depth === 0) continue;
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        segments.push(source.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return segments;
+}
+
+function isPageAgentMacroPayload(value) {
+  return (
+    isPlainObject(value) &&
+    (isPlainObject(value.action) ||
+      typeof value.evaluation_previous_goal === 'string' ||
+      typeof value.memory === 'string' ||
+      typeof value.next_goal === 'string')
+  );
+}
+
+function normalizePageAgentJSONText(text) {
+  if (typeof text !== 'string') return text;
+
+  let source = text.trim();
+  if (!source) return text;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const direct = tryParseJSON(source);
+    if (direct && typeof direct === 'object') {
+      return JSON.stringify(direct);
+    }
+    if (typeof direct === 'string' && direct.trim() && direct !== source) {
+      source = direct.trim();
+      continue;
+    }
+    break;
+  }
+
+  const segments = extractJSONObjectSegments(source);
+  if (!segments.length) return text;
+
+  let fallback = null;
+  for (const segment of segments) {
+    const parsed = tryParseJSON(segment);
+    if (!parsed || typeof parsed !== 'object') continue;
+    if (isPageAgentMacroPayload(parsed)) {
+      return JSON.stringify(parsed);
+    }
+    if (!fallback || Object.keys(parsed).length > 0) {
+      fallback = parsed;
+    }
+  }
+
+  return fallback ? JSON.stringify(fallback) : text;
+}
+
+function repairPageAgentLLMResponsePayload(payload) {
+  if (!isPlainObject(payload) || !Array.isArray(payload.choices)) {
+    return { changed: false, payload };
+  }
+
+  let changed = false;
+
+  payload.choices.forEach((choice) => {
+    if (!isPlainObject(choice) || !isPlainObject(choice.message)) return;
+
+    if (typeof choice.message.content === 'string') {
+      const normalizedContent = normalizePageAgentJSONText(choice.message.content);
+      if (normalizedContent !== choice.message.content) {
+        choice.message.content = normalizedContent;
+        changed = true;
+      }
+    }
+
+    if (!Array.isArray(choice.message.tool_calls)) return;
+
+    choice.message.tool_calls.forEach((toolCall) => {
+      const functionCall = isPlainObject(toolCall?.function) ? toolCall.function : null;
+      if (!functionCall || typeof functionCall.arguments !== 'string') return;
+
+      const normalizedArguments = normalizePageAgentJSONText(functionCall.arguments);
+      if (normalizedArguments !== functionCall.arguments) {
+        functionCall.arguments = normalizedArguments;
+        changed = true;
+      }
+    });
+  });
+
+  return { changed, payload };
+}
+
+function createPageAgentCustomFetch() {
+  return async (input, init) => {
+    const response = await fetch(input, init);
+    const contentType = response.headers.get('content-type') || '';
+    if (!/application\/json/i.test(contentType)) {
+      return response;
+    }
+
+    let rawText = '';
+    try {
+      rawText = await response.clone().text();
+    } catch {
+      return response;
+    }
+
+    const parsed = tryParseJSON(rawText);
+    if (!isPlainObject(parsed)) {
+      return response;
+    }
+
+    const repaired = repairPageAgentLLMResponsePayload(parsed);
+    if (!repaired.changed) {
+      return response;
+    }
+
+    logAgent('warn', 'Repaired malformed PageAgent LLM response', repaired.payload);
+    const headers = new Headers(response.headers);
+    headers.delete('content-length');
+    return new Response(JSON.stringify(repaired.payload), {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  };
+}
+
 function getPayloadCandidates(payload) {
   if (!payload || typeof payload !== 'object') return [];
 
@@ -2046,7 +2213,7 @@ function buildPageAgentInstructions(pageInfo) {
 
 async function loadPageAgentModule() {
   if (!pageAgentModulePromise) {
-    pageAgentModulePromise = import('page-agent');
+    pageAgentModulePromise = import('./vendor/page-agent.js');
   }
   return pageAgentModulePromise;
 }
@@ -2118,6 +2285,7 @@ async function executeFormAction(actionObj) {
     baseURL: runtime.baseURL,
     apiKey: '',
     model: runtime.model,
+    customFetch: createPageAgentCustomFetch(),
     language: resolvePageAgentLanguage(),
     promptForNextTask: false,
     instructions: {
