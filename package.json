@@ -1,6 +1,6 @@
 {
   "name": "portable-ai-agent-widget",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "便携式前端 AI Agent 入口 - 页面问答、路由跳转与表单操作",
   "license": "MIT",
   "repository": {
