@@ -1,6 +1,6 @@
 /**
  * 便携式前端 AI Agent 入口
- * 能力限制：支持「页面问答」「路由跳转」与「页面表单操作」。
+ * 能力限制：支持「页面问答」「路由跳转」与「当前页操作」。
  */
 'use strict';
 
@@ -481,6 +481,163 @@ function isPageAgentMacroPayload(value) {
   );
 }
 
+const PAGE_AGENT_TOOL_NAMES = new Set([
+  'done',
+  'wait',
+  'ask_user',
+  'click_element_by_index',
+  'input_text',
+  'select_dropdown_option',
+  'scroll',
+  'scroll_horizontally',
+  'execute_javascript',
+]);
+
+function coerceBooleanValue(value, defaultValue = true) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'y', 'success', '成功'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'n', 'fail', 'failed', '失败'].includes(normalized)) return false;
+  }
+  return defaultValue;
+}
+
+function coerceNumberValue(value, defaultValue) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return defaultValue;
+}
+
+function coerceIntegerValue(value, defaultValue = 0) {
+  return Math.max(0, Math.trunc(coerceNumberValue(value, defaultValue)));
+}
+
+function firstTextValue(source, keys) {
+  if (typeof source === 'string') return source;
+  if (!isPlainObject(source)) return '';
+  for (const key of keys) {
+    if (typeof source[key] === 'string' && source[key].trim()) {
+      return source[key].trim();
+    }
+  }
+  return '';
+}
+
+function normalizePageAgentToolInput(toolName, input) {
+  const raw = isPlainObject(input) ? input : {};
+
+  if (toolName === 'done') {
+    const text = firstTextValue(input, ['text', 'message', 'content', 'answer', 'summary', 'data']);
+    return {
+      text: text || (input == null ? '' : String(input)),
+      success: coerceBooleanValue(raw.success, true),
+    };
+  }
+
+  if (toolName === 'wait') {
+    return { seconds: Math.min(10, Math.max(1, coerceNumberValue(raw.seconds ?? input, 1))) };
+  }
+
+  if (toolName === 'ask_user') {
+    const question = firstTextValue(input, ['question', 'text', 'message', 'content']);
+    return { question: question || '请补充当前页操作需要的信息' };
+  }
+
+  if (toolName === 'click_element_by_index') {
+    return { index: coerceIntegerValue(raw.index ?? raw.element_index ?? raw.elementIndex ?? input) };
+  }
+
+  if (toolName === 'input_text' || toolName === 'select_dropdown_option') {
+    return {
+      index: coerceIntegerValue(raw.index ?? raw.element_index ?? raw.elementIndex),
+      text: firstTextValue(input, ['text', 'value', 'content', 'option', 'message']),
+    };
+  }
+
+  if (toolName === 'scroll') {
+    const output = {
+      down: coerceBooleanValue(raw.down, true),
+      num_pages: Math.min(10, Math.max(0, coerceNumberValue(raw.num_pages ?? raw.numPages, 0.1))),
+    };
+    if (raw.pixels != null) output.pixels = coerceIntegerValue(raw.pixels);
+    if (raw.index != null) output.index = coerceIntegerValue(raw.index);
+    return output;
+  }
+
+  if (toolName === 'scroll_horizontally') {
+    const output = {
+      right: coerceBooleanValue(raw.right, true),
+      pixels: coerceIntegerValue(raw.pixels, 300),
+    };
+    if (raw.index != null) output.index = coerceIntegerValue(raw.index);
+    return output;
+  }
+
+  if (toolName === 'execute_javascript') {
+    return { script: firstTextValue(input, ['script', 'code', 'javascript', 'text', 'content']) };
+  }
+
+  return input;
+}
+
+function normalizePageAgentAction(action) {
+  const parsedAction = typeof action === 'string' ? tryParseJSON(action.trim()) || action : action;
+  if (!isPlainObject(parsedAction)) return parsedAction;
+
+  const explicitName =
+    typeof parsedAction.name === 'string'
+      ? parsedAction.name.trim()
+      : typeof parsedAction.tool === 'string'
+      ? parsedAction.tool.trim()
+      : typeof parsedAction.tool_name === 'string'
+      ? parsedAction.tool_name.trim()
+      : typeof parsedAction.action === 'string'
+      ? parsedAction.action.trim()
+      : '';
+  if (PAGE_AGENT_TOOL_NAMES.has(explicitName)) {
+    const explicitInput =
+      parsedAction.input ??
+      parsedAction.arguments ??
+      parsedAction.args ??
+      parsedAction.params ??
+      parsedAction.parameters ??
+      parsedAction.value ??
+      parsedAction.text ??
+      parsedAction.message ??
+      {};
+    return { [explicitName]: normalizePageAgentToolInput(explicitName, explicitInput) };
+  }
+
+  const toolName = Object.keys(parsedAction).find((key) => PAGE_AGENT_TOOL_NAMES.has(key));
+  if (!toolName) return parsedAction;
+
+  return { [toolName]: normalizePageAgentToolInput(toolName, parsedAction[toolName]) };
+}
+
+function normalizePageAgentMacroPayload(value) {
+  if (!isPlainObject(value)) return value;
+
+  const output = { ...value };
+  if (output.action) {
+    output.action = normalizePageAgentAction(output.action);
+    return output;
+  }
+
+  const explicitAction = normalizePageAgentAction(output);
+  if (isPlainObject(explicitAction)) {
+    const toolName = Object.keys(explicitAction).find((key) => PAGE_AGENT_TOOL_NAMES.has(key));
+    if (toolName) {
+      return { action: explicitAction };
+    }
+  }
+
+  return output;
+}
+
 function normalizePageAgentJSONText(text) {
   if (typeof text !== 'string') return text;
 
@@ -490,7 +647,7 @@ function normalizePageAgentJSONText(text) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const direct = tryParseJSON(source);
     if (direct && typeof direct === 'object') {
-      return JSON.stringify(direct);
+      return JSON.stringify(normalizePageAgentMacroPayload(direct));
     }
     if (typeof direct === 'string' && direct.trim() && direct !== source) {
       source = direct.trim();
@@ -507,14 +664,14 @@ function normalizePageAgentJSONText(text) {
     const parsed = tryParseJSON(segment);
     if (!parsed || typeof parsed !== 'object') continue;
     if (isPageAgentMacroPayload(parsed)) {
-      return JSON.stringify(parsed);
+      return JSON.stringify(normalizePageAgentMacroPayload(parsed));
     }
     if (!fallback || Object.keys(parsed).length > 0) {
       fallback = parsed;
     }
   }
 
-  return fallback ? JSON.stringify(fallback) : text;
+  return fallback ? JSON.stringify(normalizePageAgentMacroPayload(fallback)) : text;
 }
 
 function repairPageAgentLLMResponsePayload(payload) {
@@ -542,6 +699,19 @@ function repairPageAgentLLMResponsePayload(payload) {
       if (!functionCall || typeof functionCall.arguments !== 'string') return;
 
       const normalizedArguments = normalizePageAgentJSONText(functionCall.arguments);
+      const functionName = typeof functionCall.name === 'string' ? functionCall.name.trim() : '';
+      if (PAGE_AGENT_TOOL_NAMES.has(functionName) && functionName !== 'AgentOutput') {
+        const parsedArguments = typeof normalizedArguments === 'string' ? tryParseJSON(normalizedArguments) : normalizedArguments;
+        functionCall.name = 'AgentOutput';
+        functionCall.arguments = JSON.stringify({
+          action: {
+            [functionName]: normalizePageAgentToolInput(functionName, parsedArguments ?? functionCall.arguments),
+          },
+        });
+        changed = true;
+        return;
+      }
+
       if (normalizedArguments !== functionCall.arguments) {
         functionCall.arguments = normalizedArguments;
         changed = true;
@@ -2196,10 +2366,12 @@ function resolvePageAgentLanguage() {
 function buildPageAgentInstructions(pageInfo) {
   const normalizedPageInfo = typeof pageInfo === 'string' ? pageInfo.trim() : '';
   const parts = [
-    '你正在当前页面内执行用户要求的页面表单操作。',
+    '你正在当前页面内执行用户要求的页面操作。',
     '执行要求：',
     '- 优先严格遵守用户原始请求，不要擅自改写任务。',
-    '- 只操作当前单页内可见且可交互的内容，不要跳出当前页面，也不要打开新标签页。',
+    '- 只操作当前单页内可见且可交互的内容，包括表单填写、按钮点击、弹窗操作、筛选查询、翻页、展开详情、上传和导入导出等。',
+    '- 不要跳出当前页面，也不要打开新标签页。',
+    '- 如果用户只是要求总结、概括、查看或提取当前页面内容，请基于当前页面可见内容直接完成并返回 done，不要为了总结而点击或填写控件。',
     '- 如果遇到验证码、权限不足、缺少必要信息或页面本身异常，请明确说明原因并安全结束任务。',
     '- 以下页面文档用于补充业务语义、字段含义和常见流程；如果文档与页面实际状态不一致，以当前页面真实内容为准。',
   ];
@@ -2271,7 +2443,7 @@ async function executeFormAction(actionObj) {
   const params = isPlainObject(actionObj.params) ? actionObj.params : {};
   const taskMessage = typeof params.message === 'string' ? params.message.trim() : '';
   if (!taskMessage) {
-    return { ok: false, message: '缺少表单操作任务' };
+    return { ok: false, message: '缺少当前页操作任务' };
   }
 
   const pageInfo = typeof params.pageInfo === 'string' ? params.pageInfo : '';
@@ -2294,7 +2466,7 @@ async function executeFormAction(actionObj) {
   });
 
   agent.onAskUser = async (question) => {
-    const promptText = sanitizeText(question, 1000) || '请补充表单操作需要的信息';
+    const promptText = sanitizeText(question, 1000) || '请补充当前页操作需要的信息';
     const answer = typeof globalObject.prompt === 'function' ? globalObject.prompt(promptText) : '';
     return typeof answer === 'string' ? answer.trim() : '';
   };
@@ -2304,13 +2476,13 @@ async function executeFormAction(actionObj) {
     const summary = typeof result?.data === 'string' ? result.data.trim() : '';
     return {
       ok: result?.success !== false,
-      message: summary || (result?.success === false ? '页面表单操作未完成' : '页面表单操作已完成'),
+      message: summary || (result?.success === false ? '当前页操作未完成' : '当前页操作已完成'),
       data: result,
     };
   } catch (error) {
     return {
       ok: false,
-      message: `页面表单操作失败：${error?.message || '未知错误'}`,
+      message: `当前页操作失败：${error?.message || '未知错误'}`,
     };
   } finally {
     try {
@@ -2343,7 +2515,7 @@ function getActionExecutionMessage(action) {
     return `正在跳转到 ${action.params.route}`;
   }
   if (action.action === 'form') {
-    return '正在执行当前页面表单操作...';
+    return '正在执行当前页操作...';
   }
   return '正在执行操作...';
 }

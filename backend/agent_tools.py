@@ -102,7 +102,7 @@ def build_agent_tools(*, pathname: str):
 
     @tool("get_current_page_doc")
     def get_current_page_doc_tool() -> str:
-        """读取当前页面的 webAIDocs/page-xxx.md。适用于当前页表单操作或当前页问答。"""
+        """读取当前页面的 webAIDocs/page-xxx.md。适用于当前页操作或当前页问答。"""
 
         route = find_current_route(pathname, routes)
         if route is None:

@@ -5,7 +5,17 @@ from typing import Any
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 
 from agent_context import RouteEntry
-from agent_settings import AGENT_MAX_MESSAGE_CHARS, ALLOWED_ACTIONS, DEFAULT_MESSAGE, DISALLOWED_RESPONSE_PATTERNS, FORM_INTENT_KEYWORDS, GUIDE_INTENT_KEYWORDS, NAV_INTENT_KEYWORDS
+from agent_settings import (
+    AGENT_MAX_MESSAGE_CHARS,
+    ALLOWED_ACTIONS,
+    CURRENT_PAGE_ACTION_CONTEXT_KEYWORDS,
+    CURRENT_PAGE_READ_INTENT_KEYWORDS,
+    DEFAULT_MESSAGE,
+    DISALLOWED_RESPONSE_PATTERNS,
+    FORM_INTENT_KEYWORDS,
+    GUIDE_INTENT_KEYWORDS,
+    NAV_INTENT_KEYWORDS,
+)
 from agent_support import truncate
 
 SENSITIVE_SENTENCE_PATTERNS = (
@@ -17,6 +27,10 @@ SENSITIVE_INLINE_PATTERNS = (
     re.compile(r"`?(?:src[\\/][^`\s，。；,;)]*|@/[^\s`，。；,;)]*)`?", flags=re.IGNORECASE),
     re.compile(r"`?[A-Za-z0-9_./\\-]+\.(?:vue|js|ts|tsx|jsx|py|json|md)`?", flags=re.IGNORECASE),
 )
+WEAK_FORM_INTENT_KEYWORDS = {"帮我", "替我", "执行", "操作", "处理", "完成"}
+AMBIGUOUS_NAV_FORM_KEYWORDS = {"打开", "切换"}
+EXPLICIT_CURRENT_PAGE_CONTEXT_KEYWORDS = ("当前页", "当前页面", "这个页面", "本页", "这里", "页面上")
+NAV_TARGET_KEYWORDS = ("页面", "模块", "菜单", "入口", "路由")
 
 
 def content_to_text(content: Any) -> str:
@@ -227,6 +241,15 @@ def _has_navigation_intent(user_message: str) -> bool:
         return False
     if any(keyword in text for keyword in GUIDE_INTENT_KEYWORDS):
         return False
+    if any(keyword in text for keyword in EXPLICIT_CURRENT_PAGE_CONTEXT_KEYWORDS):
+        return False
+    if any(keyword in text for keyword in NAV_TARGET_KEYWORDS):
+        return True
+    matched_form_keywords = {keyword for keyword in FORM_INTENT_KEYWORDS if keyword in text}
+    if matched_form_keywords - AMBIGUOUS_NAV_FORM_KEYWORDS:
+        return False
+    if any(keyword in text for keyword in CURRENT_PAGE_ACTION_CONTEXT_KEYWORDS):
+        return False
     return True
 
 
@@ -241,7 +264,20 @@ def _has_form_intent(user_message: str) -> bool:
         return False
     if any(marker in text for marker in ("?", "？")):
         return False
-    return any(keyword in text for keyword in FORM_INTENT_KEYWORDS)
+    if any(keyword in text for keyword in EXPLICIT_CURRENT_PAGE_CONTEXT_KEYWORDS) and any(
+        keyword in text for keyword in CURRENT_PAGE_READ_INTENT_KEYWORDS
+    ):
+        return True
+    matched_keywords = {keyword for keyword in FORM_INTENT_KEYWORDS if keyword in text}
+    if not matched_keywords:
+        return False
+    if matched_keywords - WEAK_FORM_INTENT_KEYWORDS:
+        return True
+    return any(keyword in text for keyword in CURRENT_PAGE_ACTION_CONTEXT_KEYWORDS)
+
+
+def _should_force_form_action(user_message: str) -> bool:
+    return _has_form_intent(user_message)
 
 
 def normalize_model_output(
@@ -271,14 +307,14 @@ def normalize_model_output(
         if message and not fallback_message:
             fallback_message = message
 
+    if _should_force_form_action(user_message):
+        return _build_form_payload(user_message, current_page_info)
+
     if fallback_message:
         return {"message": fallback_message}
 
     plain_message = normalize_plain_message(raw)
     if plain_message:
         return {"message": plain_message}
-
-    if _has_form_intent(user_message):
-        return _build_form_payload(user_message, current_page_info)
 
     return {"message": DEFAULT_MESSAGE}

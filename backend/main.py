@@ -19,7 +19,7 @@ from config import CORS_ORIGINS, MODEL_NAME, NVIDIA_API_KEY, NVIDIA_BASE_URL, PO
 
 app = FastAPI(
     title="便携式前端 AI Agent 后端",
-    description="基于 LangChain Agent 的前端站点 Agent 服务，支持路由跳转、站内问答与页面表单操作。",
+    description="基于 LangChain Agent 的前端站点 Agent 服务，支持路由跳转、站内问答与当前页操作。",
 )
 
 app.add_middleware(
@@ -88,6 +88,177 @@ def _is_page_agent_macro_payload(value: Any) -> bool:
     )
 
 
+PAGE_AGENT_TOOL_NAMES = {
+    "done",
+    "wait",
+    "ask_user",
+    "click_element_by_index",
+    "input_text",
+    "select_dropdown_option",
+    "scroll",
+    "scroll_horizontally",
+    "execute_javascript",
+}
+
+
+def _coerce_bool(value: Any, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "success", "成功"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "fail", "failed", "失败"}:
+            return False
+    return default
+
+
+def _coerce_number(value: Any, default: float) -> float:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def _coerce_index(value: Any, default: int = 0) -> int:
+    return max(0, int(_coerce_number(value, default)))
+
+
+def _first_text(value: Any, keys: tuple[str, ...]) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _normalize_page_agent_tool_input(tool_name: str, value: Any) -> Any:
+    raw = value if isinstance(value, dict) else {}
+
+    if tool_name == "done":
+        text = _first_text(value, ("text", "message", "content", "answer", "summary", "data"))
+        return {
+            "text": text or ("" if value is None else str(value)),
+            "success": _coerce_bool(raw.get("success"), True),
+        }
+
+    if tool_name == "wait":
+        return {"seconds": min(10, max(1, _coerce_number(raw.get("seconds", value), 1)))}
+
+    if tool_name == "ask_user":
+        question = _first_text(value, ("question", "text", "message", "content"))
+        return {"question": question or "请补充当前页操作需要的信息"}
+
+    if tool_name == "click_element_by_index":
+        return {"index": _coerce_index(raw.get("index", raw.get("element_index", raw.get("elementIndex", value))))}
+
+    if tool_name in {"input_text", "select_dropdown_option"}:
+        return {
+            "index": _coerce_index(raw.get("index", raw.get("element_index", raw.get("elementIndex")))),
+            "text": _first_text(value, ("text", "value", "content", "option", "message")),
+        }
+
+    if tool_name == "scroll":
+        output: dict[str, Any] = {
+            "down": _coerce_bool(raw.get("down"), True),
+            "num_pages": min(10, max(0, _coerce_number(raw.get("num_pages", raw.get("numPages")), 0.1))),
+        }
+        if raw.get("pixels") is not None:
+            output["pixels"] = _coerce_index(raw.get("pixels"))
+        if raw.get("index") is not None:
+            output["index"] = _coerce_index(raw.get("index"))
+        return output
+
+    if tool_name == "scroll_horizontally":
+        output = {
+            "right": _coerce_bool(raw.get("right"), True),
+            "pixels": _coerce_index(raw.get("pixels"), 300),
+        }
+        if raw.get("index") is not None:
+            output["index"] = _coerce_index(raw.get("index"))
+        return output
+
+    if tool_name == "execute_javascript":
+        return {"script": _first_text(value, ("script", "code", "javascript", "text", "content"))}
+
+    return value
+
+
+def _parse_json_like(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+def _normalize_page_agent_action(value: Any) -> Any:
+    action = _parse_json_like(value)
+    if not isinstance(action, dict):
+        return action
+
+    explicit_name = ""
+    for key in ("name", "tool", "tool_name", "action"):
+        candidate = action.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            explicit_name = candidate.strip()
+            break
+
+    if explicit_name in PAGE_AGENT_TOOL_NAMES:
+        explicit_input = (
+            action.get("input")
+            if "input" in action
+            else action.get("arguments")
+            if "arguments" in action
+            else action.get("args")
+            if "args" in action
+            else action.get("params")
+            if "params" in action
+            else action.get("parameters")
+            if "parameters" in action
+            else action.get("value")
+            if "value" in action
+            else action.get("text")
+            if "text" in action
+            else action.get("message")
+            if "message" in action
+            else {}
+        )
+        return {explicit_name: _normalize_page_agent_tool_input(explicit_name, explicit_input)}
+
+    for tool_name in action:
+        if tool_name in PAGE_AGENT_TOOL_NAMES:
+            return {tool_name: _normalize_page_agent_tool_input(tool_name, action.get(tool_name))}
+
+    return action
+
+
+def _normalize_page_agent_macro_payload(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+
+    output = dict(value)
+    if output.get("action") is not None:
+        output["action"] = _normalize_page_agent_action(output.get("action"))
+        return output
+
+    explicit_action = _normalize_page_agent_action(output)
+    if isinstance(explicit_action, dict) and any(key in PAGE_AGENT_TOOL_NAMES for key in explicit_action):
+        return {"action": explicit_action}
+    return output
+
+
 def _extract_json_object_segments(text: str) -> list[dict[str, Any]]:
     source = str(text or "").strip()
     if not source:
@@ -138,7 +309,7 @@ def _normalize_page_agent_json_text(value: Any) -> Any:
         except Exception:
             break
         if isinstance(parsed, dict):
-            return json.dumps(parsed, ensure_ascii=False)
+            return json.dumps(_normalize_page_agent_macro_payload(parsed), ensure_ascii=False)
         if isinstance(parsed, str) and parsed.strip() and parsed.strip() != source:
             source = parsed.strip()
             continue
@@ -151,12 +322,12 @@ def _normalize_page_agent_json_text(value: Any) -> Any:
     fallback: dict[str, Any] | None = None
     for segment in segments:
         if _is_page_agent_macro_payload(segment):
-            return json.dumps(segment, ensure_ascii=False)
+            return json.dumps(_normalize_page_agent_macro_payload(segment), ensure_ascii=False)
         if fallback is None or bool(segment):
             fallback = segment
 
     if fallback is not None:
-        return json.dumps(fallback, ensure_ascii=False)
+        return json.dumps(_normalize_page_agent_macro_payload(fallback), ensure_ascii=False)
     return value
 
 
@@ -192,6 +363,18 @@ def _repair_page_agent_response_payload(payload: Any) -> tuple[Any, bool]:
                 continue
 
             normalized_arguments = _normalize_page_agent_json_text(arguments)
+            function_name = function.get("name")
+            if isinstance(function_name, str) and function_name.strip() in PAGE_AGENT_TOOL_NAMES:
+                tool_name = function_name.strip()
+                parsed_arguments = _parse_json_like(normalized_arguments)
+                function["name"] = "AgentOutput"
+                function["arguments"] = json.dumps(
+                    {"action": {tool_name: _normalize_page_agent_tool_input(tool_name, parsed_arguments)}},
+                    ensure_ascii=False,
+                )
+                changed = True
+                continue
+
             if normalized_arguments != arguments:
                 function["arguments"] = normalized_arguments
                 changed = True
