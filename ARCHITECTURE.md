@@ -24,6 +24,7 @@ Widget 会把用户消息和当前页面上下文发送给后端，包括：
 后端基于 FastAPI + LangChain，职责是：
 
 - 读取 `webAIDocs/routes.md` 与对应 `page-xxx.md`
+- 通过 MCP 接入 `webGenerate` 或其他外部工具，并将 MCP tools 注入 Agent
 - 结合当前页面上下文生成回答
 - 输出标准化结果
 - 过滤危险内容
@@ -49,6 +50,8 @@ Widget 会把用户消息和当前页面上下文发送给后端，包括：
 - 其他支持 `/` 触发的助手：`/webGenerate .`
 
 `scripts/webGenerate.js` 本身只负责安装和卸载对应平台的 Skill、规则文件和 Hook。
+
+同时它提供 `webGenerate MCP` 只读入口，用当前项目路径为根目录启动 stdio MCP Server，暴露 `list_routes`、`search_routes`、`get_page_doc`、`list_page_docs` 等工具。
 
 ## 4. 整体链路
 

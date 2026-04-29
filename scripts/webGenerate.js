@@ -12,6 +12,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   rmdirSync,
@@ -262,6 +263,11 @@ Rules:
 async function main() {
   const args = process.argv.slice(2);
 
+  if (args[0] && args[0].toLowerCase() === 'mcp') {
+    startMcpServer(args.slice(1));
+    return;
+  }
+
   if (
     args.length === 0
     || args.includes('-h')
@@ -284,6 +290,7 @@ async function main() {
 
 function printHelp() {
   console.log('Usage: webGenerate <platform> <install|uninstall>');
+  console.log('       webGenerate MCP [--root <projectRoot>]');
   console.log('');
   console.log('Platforms:');
   console.log('  claude | codex | opencode | copilot-cli | vscode-copilot | gemini | antigravity | cursor | trae | trae-cn');
@@ -310,6 +317,390 @@ function printHelp() {
   console.log('Use assistant command to generate docs:');
   console.log('  /webGenerate [path] [--update]');
   console.log('  $webGenerate [path] [--update]   (Codex)');
+  console.log('');
+  console.log('MCP:');
+  console.log('  webGenerate MCP');
+  console.log('  webGenerate MCP --root ./your-project');
+}
+
+function startMcpServer(args) {
+  const root = resolve(readMcpRootArg(args) || process.cwd());
+  const state = {
+    root,
+    docsDir: join(root, 'webAIDocs'),
+  };
+
+  let inputBuffer = '';
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    inputBuffer += chunk;
+    let newlineIndex = inputBuffer.indexOf('\n');
+    while (newlineIndex >= 0) {
+      const line = inputBuffer.slice(0, newlineIndex).trim();
+      inputBuffer = inputBuffer.slice(newlineIndex + 1);
+      if (line) handleMcpLine(line, state);
+      newlineIndex = inputBuffer.indexOf('\n');
+    }
+  });
+
+  process.stdin.on('end', () => {
+    const line = inputBuffer.trim();
+    if (line) handleMcpLine(line, state);
+  });
+}
+
+function readMcpRootArg(args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--root' && args[i + 1]) return args[i + 1];
+    if (arg.startsWith('--root=')) return arg.slice('--root='.length);
+  }
+  return null;
+}
+
+function handleMcpLine(line, state) {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch (error) {
+    writeMcpError(null, -32700, `Parse error: ${error.message}`);
+    return;
+  }
+
+  if (!message || typeof message !== 'object') {
+    writeMcpError(null, -32600, 'Invalid JSON-RPC message');
+    return;
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(message, 'id')) {
+    return;
+  }
+
+  try {
+    const result = handleMcpRequest(message.method, message.params || {}, state);
+    writeMcpResponse(message.id, result);
+  } catch (error) {
+    writeMcpError(message.id, error.code || -32000, error.message || String(error));
+  }
+}
+
+function handleMcpRequest(method, params, state) {
+  if (method === 'initialize') {
+    return {
+      protocolVersion: '2024-11-05',
+      capabilities: { tools: {} },
+      serverInfo: { name: 'webGenerate', version: VERSION },
+    };
+  }
+
+  if (method === 'ping') {
+    return {};
+  }
+
+  if (method === 'tools/list') {
+    return { tools: buildMcpToolDefinitions() };
+  }
+
+  if (method === 'tools/call') {
+    return callMcpTool(params, state);
+  }
+
+  const error = new Error(`Unsupported MCP method: ${method}`);
+  error.code = -32601;
+  throw error;
+}
+
+function buildMcpToolDefinitions() {
+  return [
+    {
+      name: 'list_routes',
+      description: 'List routes from webAIDocs/routes.md for the current project.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Optional keyword used to filter route path, title, or doc file.',
+          },
+        },
+      },
+    },
+    {
+      name: 'search_routes',
+      description: 'Search route candidates by business text, page title, path, or doc file.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Search text.',
+          },
+          limit: {
+            type: 'integer',
+            description: 'Maximum number of route candidates to return.',
+          },
+        },
+        required: ['query'],
+      },
+    },
+    {
+      name: 'get_page_doc',
+      description: 'Read one webAIDocs/page-xxx.md document by route path, page doc filename, or exact page title.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          route_or_doc: {
+            type: 'string',
+            description: 'Route path, page-xxx.md filename, or exact page title.',
+          },
+        },
+        required: ['route_or_doc'],
+      },
+    },
+    {
+      name: 'list_page_docs',
+      description: 'List available webAIDocs/page-*.md document files.',
+      inputSchema: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  ];
+}
+
+function callMcpTool(params, state) {
+  const name = String(params?.name || '').trim();
+  const args = params?.arguments && typeof params.arguments === 'object' ? params.arguments : {};
+
+  if (name === 'list_routes') {
+    const query = String(args.query || '').trim();
+    const routes = query ? filterRoutes(readRoutes(state), query) : readRoutes(state);
+    return textToolResult(formatRoutes(routes));
+  }
+
+  if (name === 'search_routes') {
+    const query = String(args.query || '').trim();
+    const limit = Math.max(1, Number.parseInt(args.limit || '8', 10) || 8);
+    const routes = filterRoutes(readRoutes(state), query).slice(0, limit);
+    return textToolResult(formatRoutes(routes));
+  }
+
+  if (name === 'get_page_doc') {
+    const reference = String(args.route_or_doc || '').trim();
+    const route = resolveRouteReference(reference, readRoutes(state));
+    if (!route) {
+      return textToolResult(`未能定位到页面文档：${reference}`, true);
+    }
+    if (!route.docFile) {
+      return textToolResult(`路由 ${route.path} 没有关联的页面文档。`, true);
+    }
+    const doc = readSafePageDoc(state, route.docFile);
+    if (!doc.trim()) {
+      return textToolResult(`未读取到 ${route.docFile} 的内容。`, true);
+    }
+    return textToolResult([
+      `route: ${route.path}`,
+      `title: ${route.title || '-'}`,
+      `doc_file: ${route.docFile}`,
+      '',
+      doc,
+    ].join('\n'));
+  }
+
+  if (name === 'list_page_docs') {
+    return textToolResult(listPageDocs(state).join('\n') || '未找到 page-*.md 文档。');
+  }
+
+  const error = new Error(`Unknown tool: ${name}`);
+  error.code = -32602;
+  throw error;
+}
+
+function writeMcpResponse(id, result) {
+  process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
+}
+
+function writeMcpError(id, code, message) {
+  process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } })}\n`);
+}
+
+function textToolResult(text, isError = false) {
+  return {
+    content: [{ type: 'text', text: String(text || '') }],
+    isError,
+  };
+}
+
+function readRoutesDoc(state) {
+  const routesPath = join(state.docsDir, 'routes.md');
+  if (!existsSync(routesPath)) return '';
+  try {
+    return readFileSync(routesPath, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+function readRoutes(state) {
+  const markdown = readRoutesDoc(state);
+  const tables = parseMarkdownTables(markdown);
+  const routes = [];
+
+  for (const table of tables) {
+    if (table.headers.length < 2) continue;
+    const pathIdx = findTableColumn(table.headers, ['路径', 'path', 'route'], 0);
+    const titleIdx = findTableColumn(table.headers, ['页面', 'title', 'name', '说明'], 1);
+    const docIdx = findTableColumn(table.headers, ['文档', 'doc', 'file'], Math.min(3, table.headers.length - 1));
+
+    for (const row of table.rows) {
+      const routePath = String(row[pathIdx] || '').trim();
+      if (!routePath || routePath === '-') continue;
+      const title = String(row[titleIdx] || '').trim();
+      const docFile = normalizeDocFile(row[docIdx] || '');
+      routes.push({ path: routePath, title, docFile });
+    }
+  }
+
+  return routes;
+}
+
+function parseMarkdownTables(markdown) {
+  const tables = [];
+  const lines = String(markdown || '').split(/\r?\n/);
+  let index = 0;
+
+  while (index < lines.length) {
+    const first = splitTableRow(lines[index]);
+    if (!first.length) {
+      index += 1;
+      continue;
+    }
+
+    const block = [first];
+    index += 1;
+    while (index < lines.length) {
+      const row = splitTableRow(lines[index]);
+      if (!row.length) break;
+      block.push(row);
+      index += 1;
+    }
+
+    if (block.length >= 2 && isSeparatorRow(block[1])) {
+      tables.push({ headers: block[0], rows: block.slice(2) });
+    }
+  }
+
+  return tables;
+}
+
+function splitTableRow(line) {
+  let text = String(line || '').trim();
+  if (!text.includes('|')) return [];
+  if (text.startsWith('|')) text = text.replace(/^\|/, '').replace(/\|$/, '');
+  return text.split('|').map((cell) => cell.trim());
+}
+
+function isSeparatorRow(cells) {
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(String(cell || '').replace(/\s/g, '')));
+}
+
+function normalizeHeader(value) {
+  return String(value || '').toLowerCase().replace(/[\s_\-:/]/g, '');
+}
+
+function findTableColumn(headers, keywords, defaultIdx) {
+  const normalized = headers.map(normalizeHeader);
+  const found = normalized.findIndex((header) => keywords.some((keyword) => header.includes(keyword.toLowerCase())));
+  if (found >= 0) return found;
+  return Math.min(defaultIdx, Math.max(0, headers.length - 1));
+}
+
+function normalizeDocFile(value) {
+  const text = String(value || '').trim();
+  if (!text || text === '-' || text === 'null') return '';
+  const match = text.match(/page-[A-Za-z0-9._-]+\.md/);
+  return cleanPageDocFilename(match ? match[0] : text);
+}
+
+function cleanPageDocFilename(filename) {
+  const candidate = String(filename || '').replace(/\\/g, '/').split('/').pop();
+  if (!candidate || !candidate.endsWith('.md') || candidate.includes('..')) return '';
+  return candidate;
+}
+
+function filterRoutes(routes, query) {
+  const normalizedQuery = String(query || '').trim().toLowerCase();
+  if (!normalizedQuery) return routes;
+  return routes
+    .map((route) => ({ route, score: routeScore(route, normalizedQuery) }))
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score)
+    .map((item) => item.route);
+}
+
+function routeScore(route, query) {
+  const haystacks = [route.path, route.title, route.docFile].map((item) => String(item || '').toLowerCase());
+  let score = 0;
+  for (const item of haystacks) {
+    if (!item) continue;
+    if (item === query) score += 20;
+    if (item.includes(query)) score += 10;
+    for (const token of query.split(/[\s/_-]+/)) {
+      if (token.length >= 2 && item.includes(token)) score += 2;
+    }
+  }
+  return score;
+}
+
+function resolveRouteReference(reference, routes) {
+  const raw = String(reference || '').trim();
+  if (!raw) return null;
+  const normalized = raw.replace(/\\/g, '/');
+  const docFile = normalized.endsWith('.md') ? cleanPageDocFilename(normalized) : '';
+
+  if (docFile) {
+    return routes.find((route) => route.docFile === docFile) || null;
+  }
+
+  const exactPath = routes.find((route) => route.path === normalized);
+  if (exactPath) return exactPath;
+
+  const lowered = normalized.toLowerCase();
+  const exactTitle = routes.filter((route) => String(route.title || '').toLowerCase() === lowered);
+  if (exactTitle.length === 1) return exactTitle[0];
+
+  const exactDoc = routes.filter((route) => String(route.docFile || '').toLowerCase().replace(/\.md$/, '') === lowered);
+  if (exactDoc.length === 1) return exactDoc[0];
+
+  return null;
+}
+
+function formatRoutes(routes) {
+  if (!routes.length) return '未找到匹配的路由。';
+  return routes.map((route) => `- ${route.path} | ${route.title || '-'} | ${route.docFile || '-'}`).join('\n');
+}
+
+function listPageDocs(state) {
+  if (!existsSync(state.docsDir)) return [];
+  try {
+    return readdirSync(state.docsDir)
+      .filter((name) => /^page-[A-Za-z0-9._-]+\.md$/.test(name))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+function readSafePageDoc(state, filename) {
+  const safe = cleanPageDocFilename(filename);
+  if (!safe) return '';
+  const filePath = join(state.docsDir, safe);
+  if (!existsSync(filePath)) return '';
+  try {
+    return readFileSync(filePath, 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 function tryHandleInstallCommand(args) {

@@ -38,6 +38,9 @@
 - `WIDGET_KNOWLEDGE_DIR`
 - `WIDGET_KNOWLEDGE_SKILL_DIR`
 - `WIDGET_SKILLS_DIR`
+- `AGENT_MCP_ENABLED`（默认开启，设为 `false` / `0` 可关闭 MCP 接入）
+- `AGENT_MCP_CONFIG`（自定义 MCP JSON 配置路径）
+- `AGENT_MCP_WEBGENERATE`（默认开启，设为 `false` / `0` 可关闭内置 webGenerate MCP）
 - `CORS_ORIGINS`
 - `PORT`
 
@@ -59,10 +62,49 @@
 - `STREAM_THINKING_SUMMARY_LIMIT`
 - `STREAM_MAX_TOOL_PREVIEW_CHARS`
 
+## MCP 接入
+
+后端启动 Agent 时会默认尝试连接内置 `webGenerate` MCP。若项目根目录没有 `webAIDocs/`、Node 命令不可用，或显式关闭配置，则自动忽略，不影响原有本地知识库工具。
+
+自定义 MCP 配置可放在以下位置之一，或通过 `AGENT_MCP_CONFIG` 指定：
+
+- `mcp.json`
+- `.webgenerate/mcp.json`
+- `backend/mcp.json`
+
+仓库根目录已提供默认 `mcp.json`，开发者可以直接基于它修改或增加自定义 MCP Server。
+
+配置示例：
+
+```json
+{
+  "mcpServers": {
+    "webGenerate": {
+      "enabled": true,
+      "command": "node",
+      "args": ["${PROJECT_ROOT}/scripts/webGenerate.js", "MCP", "--root", "${PROJECT_ROOT}"],
+      "cwd": "${PROJECT_ROOT}"
+    },
+    "customDocs": {
+      "enabled": true,
+      "command": "node",
+      "args": ["./server.js"],
+      "cwd": "./mcp/custom-docs",
+      "env": {
+        "TOKEN": "your-token"
+      }
+    }
+  }
+}
+```
+
+MCP 工具会以 `mcp_<server>_<tool>` 的形式注入 LangChain Agent。
+
 ## 代码结构
 
 - `agent.py`：LangChain Agent 编排、stream 事件转换、最终 payload 抽取
 - `agent_tools.py`：`search_routes` / `get_page_doc` / `get_current_page_doc` 工具
+- `mcp_client.py`：MCP stdio client、JSON 配置加载与 LangChain Tool 适配
 - `agent_context.py`：路由表解析、路径匹配、候选路由搜索
 - `agent_llm.py`：OpenAI 兼容 Chat Model 初始化
 - `agent_output.py`：模型最终文本/JSON 归一化为前端动作协议

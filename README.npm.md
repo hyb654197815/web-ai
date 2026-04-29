@@ -67,6 +67,20 @@ $webGenerate . --update
 - `webAIDocs/routes.md`
 - `webAIDocs/page-xxx.md`
 
+## MCP Server
+
+也可以启动一个只读 MCP Server，让支持 MCP 的 Agent 查询当前项目的 `webAIDocs/`：
+
+```bash
+webGenerate MCP
+webgenerate MCP
+webgenerate MCP --root ./your-project
+```
+
+它提供路由列表、路由搜索、页面文档读取和页面文档列表等 tools。
+
+仓库根目录提供了默认 `mcp.json`，开发者可以基于它增加自己的 MCP Server 配置。
+
 ## 本地安装后的调用方式
 
 如果你执行的是：

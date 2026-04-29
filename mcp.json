@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "webGenerate": {
+      "enabled": false,
+      "type": "stdio",
+      "timeoutSeconds": 8.0,
+      "command": "node",
+      "args": [
+        "D:\\test\\web-ai\\scripts\\webGenerate.js",
+        "MCP",
+        "--root",
+        "D:\\test\\web-ai"
+      ],
+      "cwd": "D:\\test\\web-ai",
+      "env": {}
+    }
+  }
+}

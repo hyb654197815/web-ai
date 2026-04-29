@@ -10,6 +10,7 @@ from agent_context import (
 )
 from agent_settings import AGENT_MAX_PAGE_DOC_CHARS
 from agent_support import truncate
+from mcp_client import build_mcp_langchain_tools
 from tools import read_page_doc
 
 
@@ -122,4 +123,9 @@ def build_agent_tools(*, pathname: str):
             ]
         )
 
-    return [search_routes_tool, get_page_doc_tool, get_current_page_doc_tool]
+    return [
+        search_routes_tool,
+        get_page_doc_tool,
+        get_current_page_doc_tool,
+        *build_mcp_langchain_tools(),
+    ]

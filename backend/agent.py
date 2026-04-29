@@ -81,6 +81,8 @@ def _summarize_ai_message(message: AIMessage) -> tuple[str, str] | None:
                 tool_summaries.append("读取相关页面说明")
             elif name == "search_routes":
                 tool_summaries.append("搜索候选页面")
+            elif name.startswith("mcp_"):
+                tool_summaries.append(f"调用 MCP 工具 {name}")
             else:
                 tool_summaries.append(name)
         summary = "计划调用工具：" + "；".join(tool_summaries)
@@ -105,6 +107,9 @@ def _summarize_tool_message(message: ToolMessage) -> str:
         count = len([line for line in content.splitlines() if line.strip().startswith("- ")])
         if count:
             return f"{tool_name} 已返回 {count} 个候选路由。"
+
+    if tool_name.startswith("mcp_"):
+        return f"{tool_name} 已返回 MCP 结果。"
 
     preview = truncate(sanitize_user_visible_text(content or "工具已返回结果。"), STREAM_MAX_TOOL_PREVIEW_CHARS)
     return f"{tool_name} 返回：{preview}"

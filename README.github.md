@@ -123,6 +123,27 @@ $webGenerate . --update
 - `webAIDocs/routes.md`
 - `webAIDocs/page-xxx.md`
 
+### webGenerate MCP
+
+`webgenerate` 也可以作为 MCP Server 运行，用当前项目作为根目录读取 `webAIDocs/`：
+
+```bash
+webGenerate MCP
+webgenerate MCP
+webgenerate MCP --root ./your-project
+```
+
+当前暴露的 MCP tools：
+
+- `list_routes`：查询所有路由，可按关键词过滤
+- `search_routes`：按业务描述、路径、页面名搜索路由
+- `get_page_doc`：按路由、页面文档名或页面标题读取某个 `page-xxx.md`
+- `list_page_docs`：列出所有页面文档
+
+后端默认会尝试连接内置 `webGenerate` MCP；如果未开启、项目没有 `webAIDocs/` 或 MCP 启动失败，会自动忽略。也可以通过 `mcp.json` / `.webgenerate/mcp.json` / `backend/mcp.json` 或环境变量 `AGENT_MCP_CONFIG` 接入其他 MCP Server。
+
+仓库根目录提供了默认 `mcp.json`，可以直接作为自定义 MCP 配置模板。
+
 ## 本地开发
 
 ```bash

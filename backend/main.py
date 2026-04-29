@@ -12,11 +12,13 @@ from urllib.request import urlopen
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent_runtime import run_agent, stream_agent_events
-from config import CORS_ORIGINS, MODEL_NAME, NVIDIA_API_KEY, NVIDIA_BASE_URL, PORT, REFERENCES_DIR
+from agent_admin import load_admin_config, probe_model, public_admin_config, save_admin_config, select_model_config, update_model_status
+from config import CORS_ORIGINS, PORT, PROJECT_ROOT, REFERENCES_DIR
+from mcp_client import inspect_mcp_server, load_all_mcp_servers, mcp_server_from_payload
 
 app = FastAPI(
     title="便携式前端 AI Agent 后端",
@@ -31,6 +33,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+ADMIN_HTML_PATH = PROJECT_ROOT / "backend" / "admin.html"
+ADMIN_SCRIPT_PATH = PROJECT_ROOT / "dist" / "agent-admin.iife.js"
+
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000, description="用户输入")
@@ -44,15 +49,33 @@ class SessionMessageRequest(BaseModel):
     context: dict | None = Field(None, description="上下文，如 pathname")
 
 
-def _page_agent_llm_enabled() -> bool:
-    return bool((NVIDIA_BASE_URL or "").strip() and (MODEL_NAME or "").strip() and (NVIDIA_API_KEY or "").strip())
+def _page_agent_llm_enabled(model_config: dict[str, Any] | None = None) -> bool:
+    selected = model_config or select_model_config()
+    return bool(
+        str((selected or {}).get("baseURL") or "").strip()
+        and str((selected or {}).get("model") or (selected or {}).get("name") or "").strip()
+        and str((selected or {}).get("apiKey") or "").strip()
+    )
 
 
-def _page_agent_proxy_base_url() -> str:
-    return str(NVIDIA_BASE_URL or "").rstrip("/")
+def _page_agent_proxy_base_url(model_config: dict[str, Any] | None = None) -> str:
+    selected = model_config or select_model_config()
+    return str((selected or {}).get("baseURL") or "").rstrip("/")
 
 
-def _build_proxy_request_body(raw_body: bytes) -> bytes:
+def _anthropic_messages_url(model_config: dict[str, Any] | None = None) -> str:
+    base_url = _page_agent_proxy_base_url(model_config) or "https://api.anthropic.com"
+    if base_url.endswith("/v1"):
+        base_url = base_url[:-3]
+    return f"{base_url}/v1/messages"
+
+
+def _model_provider(model_config: dict[str, Any] | None = None) -> str:
+    selected = model_config or select_model_config()
+    return str((selected or {}).get("provider") or "OpenAI Compatible").strip()
+
+
+def _build_proxy_request_body(raw_body: bytes, model_config: dict[str, Any] | None = None) -> bytes:
     if not raw_body:
         return raw_body
 
@@ -62,18 +85,97 @@ def _build_proxy_request_body(raw_body: bytes) -> bytes:
         return raw_body
 
     if isinstance(payload, dict):
-        payload["model"] = MODEL_NAME
+        selected = model_config or select_model_config()
+        payload["model"] = str((selected or {}).get("model") or (selected or {}).get("name") or "").strip()
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
     return raw_body
 
 
-def _build_page_agent_proxy_headers() -> dict[str, str]:
+def _build_page_agent_proxy_headers(model_config: dict[str, Any] | None = None) -> dict[str, str]:
+    selected = model_config or select_model_config()
+    provider = _model_provider(selected)
+    if provider == "Anthropic":
+        return {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "x-api-key": str((selected or {}).get("apiKey") or "").strip(),
+            "anthropic-version": "2023-06-01",
+        }
     return {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
+        "Authorization": f"Bearer {str((selected or {}).get('apiKey') or '').strip()}",
         "User-Agent": "OpenAI/Python 1.0",
     }
+
+
+def _openai_content_to_anthropic(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(parts)
+    return "" if content is None else str(content)
+
+
+def _build_anthropic_request_body(raw_body: bytes, model_config: dict[str, Any]) -> bytes:
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        payload = {}
+
+    messages = payload.get("messages") if isinstance(payload, dict) else []
+    system_parts: list[str] = []
+    anthropic_messages: list[dict[str, str]] = []
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "user")
+            content = _openai_content_to_anthropic(message.get("content"))
+            if role == "system":
+                if content:
+                    system_parts.append(content)
+                continue
+            anthropic_messages.append({"role": "assistant" if role == "assistant" else "user", "content": content})
+
+    body: dict[str, Any] = {
+        "model": str(model_config.get("model") or model_config.get("name") or "").strip(),
+        "max_tokens": int(payload.get("max_tokens") or payload.get("max_completion_tokens") or 1024) if isinstance(payload, dict) else 1024,
+        "messages": anthropic_messages or [{"role": "user", "content": ""}],
+    }
+    if system_parts:
+        body["system"] = "\n\n".join(system_parts)
+    if isinstance(payload, dict) and isinstance(payload.get("temperature"), (int, float)):
+        body["temperature"] = payload["temperature"]
+    return json.dumps(body, ensure_ascii=False).encode("utf-8")
+
+
+def _normalize_anthropic_response(content: bytes) -> bytes:
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except Exception:
+        return content
+
+    text_parts: list[str] = []
+    for item in payload.get("content", []) if isinstance(payload, dict) else []:
+        if isinstance(item, dict) and item.get("type") == "text":
+            text_parts.append(str(item.get("text") or ""))
+    text = "\n".join(part for part in text_parts if part)
+    openai_payload = {
+        "id": payload.get("id", "anthropic-message") if isinstance(payload, dict) else "anthropic-message",
+        "object": "chat.completion",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
+    }
+    return json.dumps(openai_payload, ensure_ascii=False).encode("utf-8")
 
 
 def _is_plain_object(value: Any) -> bool:
@@ -483,12 +585,139 @@ def health():
     return {"status": "ok", "knowledge_dir": REFERENCES_DIR}
 
 
+@app.get("/admin", response_class=FileResponse)
+@app.get("/admin/", response_class=FileResponse)
+def agent_admin_page() -> FileResponse:
+    if not ADMIN_HTML_PATH.exists():
+        raise HTTPException(status_code=404, detail="Agent admin HTML is missing")
+    return FileResponse(ADMIN_HTML_PATH, media_type="text/html")
+
+
+@app.get("/admin/agent-admin.iife.js", response_class=FileResponse)
+def agent_admin_script() -> FileResponse:
+    if not ADMIN_SCRIPT_PATH.exists():
+        raise HTTPException(status_code=404, detail="Run npm run build before opening Agent admin")
+    return FileResponse(ADMIN_SCRIPT_PATH, media_type="application/javascript")
+
+
 @app.get("/api/page-agent/config")
 def page_agent_config() -> dict[str, Any]:
+    selected = select_model_config()
     return {
-        "enabled": _page_agent_llm_enabled(),
-        "model": str(MODEL_NAME or "").strip(),
+        "enabled": _page_agent_llm_enabled(selected),
+        "model": str((selected or {}).get("model") or (selected or {}).get("name") or "").strip(),
     }
+
+
+def _admin_mcp_servers() -> list[dict[str, Any]]:
+    return [inspect_mcp_server(server) for server in load_all_mcp_servers()]
+
+
+def _save_mcp_servers_from_payload(payload: dict[str, Any]) -> None:
+    servers = payload.get("mcpServers")
+    if not isinstance(servers, list):
+        return
+
+    rendered: dict[str, Any] = {}
+    for server in servers:
+        if not isinstance(server, dict):
+            continue
+        name = str(server.get("name") or "").strip()
+        if not name:
+            continue
+        transport_type = str(server.get("type") or ("streamable_http" if server.get("url") else "stdio")).strip().lower() or "stdio"
+        rendered_server: dict[str, Any] = {
+            "enabled": bool(server.get("enabled", True)),
+            "type": transport_type,
+            "timeoutSeconds": float(server.get("timeoutSeconds") or server.get("timeout_seconds") or 8),
+        }
+        if transport_type in {"streamable_http", "http", "sse"}:
+            rendered_server["url"] = str(server.get("url") or "").strip()
+            if isinstance(server.get("headers"), dict):
+                rendered_server["headers"] = server["headers"]
+        else:
+            rendered_server.update(
+                {
+                    "command": str(server.get("command") or "").strip(),
+                    "args": server.get("args") if isinstance(server.get("args"), list) else [],
+                    "cwd": str(server.get("cwd") or "").strip(),
+                    "env": server.get("env") if isinstance(server.get("env"), dict) else {},
+                }
+            )
+        rendered[name] = rendered_server
+
+    (PROJECT_ROOT / "mcp.json").write_text(json.dumps({"mcpServers": rendered}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+@app.get("/api/admin/config")
+def admin_config() -> dict[str, Any]:
+    return {
+        **public_admin_config(),
+        "mcpServers": _admin_mcp_servers(),
+    }
+
+
+@app.post("/api/admin/config")
+async def save_admin_config_endpoint(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="invalid JSON body") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="body must be an object")
+
+    _save_mcp_servers_from_payload(payload)
+    saved = save_admin_config(payload)
+    return {
+        **public_admin_config(saved),
+        "mcpServers": _admin_mcp_servers(),
+    }
+
+
+@app.post("/api/admin/models/probe")
+async def admin_probe_model(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="invalid JSON body") from exc
+    model = payload.get("model") if isinstance(payload, dict) else None
+    if not isinstance(model, dict):
+        raise HTTPException(status_code=422, detail="model is required")
+
+    api_key = str(model.get("apiKey") or "")
+    model_id = str(model.get("id") or "").strip()
+    if "*" in api_key and model_id:
+        for saved_model in load_admin_config().get("models", []):
+            if isinstance(saved_model, dict) and str(saved_model.get("id") or "").strip() == model_id:
+                model = {**model, "apiKey": saved_model.get("apiKey") or ""}
+                break
+
+    result = probe_model(model)
+    if model_id:
+        from datetime import datetime, timezone
+
+        update_model_status(model_id, {**result, "lastCheckedAt": datetime.now(timezone.utc).isoformat()})
+    return result
+
+
+@app.post("/api/admin/mcp/probe")
+async def admin_probe_mcp(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="invalid JSON body") from exc
+    server_payload = payload.get("server") if isinstance(payload, dict) else None
+    if not isinstance(server_payload, dict):
+        raise HTTPException(status_code=422, detail="server is required")
+
+    name = str(server_payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="server.name is required")
+
+    server = mcp_server_from_payload(name, server_payload)
+    if not server:
+        raise HTTPException(status_code=422, detail="invalid MCP server config")
+    return inspect_mcp_server(server)
 
 
 def _normalize_path_candidate(value: str | None) -> str:
@@ -639,29 +868,66 @@ def chat(body: ChatRequest, stream: bool = Query(False, description="是否启�
 
 @app.post("/api/page-agent/chat/completions", response_model=None)
 async def page_agent_chat_completions(request: Request) -> Response:
-    if not _page_agent_llm_enabled():
-        raise HTTPException(status_code=503, detail="PageAgent LLM is not configured on server")
+    raw_body = await request.body()
+    attempted: set[str] = set()
+    last_error = ""
 
-    upstream_request = UrlRequest(
-        f"{_page_agent_proxy_base_url()}/chat/completions",
-        data=_build_proxy_request_body(await request.body()),
-        method="POST",
-        headers=_build_page_agent_proxy_headers(),
-    )
+    while True:
+        selected_model = select_model_config(exclude_ids=attempted)
+        if not _page_agent_llm_enabled(selected_model):
+            break
 
-    try:
-        with urlopen(upstream_request, timeout=120) as upstream_response:
-            content = upstream_response.read()
-            content_type = upstream_response.headers.get("Content-Type", "application/json")
-            content = _normalize_page_agent_proxy_response(content, content_type)
-            return Response(content=content, status_code=upstream_response.status, media_type=content_type.split(";")[0])
-    except HTTPError as exc:
-        content = exc.read()
-        content_type = exc.headers.get("Content-Type", "application/json") if exc.headers else "application/json"
-        content = _normalize_page_agent_proxy_response(content, content_type)
-        return Response(content=content, status_code=exc.code, media_type=content_type.split(";")[0])
-    except URLError as exc:
-        raise HTTPException(status_code=502, detail=f"Upstream LLM request failed: {exc.reason}") from exc
+        model_id = str((selected_model or {}).get("id") or "").strip()
+        if model_id:
+            attempted.add(model_id)
+
+        provider = _model_provider(selected_model)
+        endpoint = (
+            _anthropic_messages_url(selected_model)
+            if provider == "Anthropic"
+            else f"{_page_agent_proxy_base_url(selected_model)}/chat/completions"
+        )
+        request_body = (
+            _build_anthropic_request_body(raw_body, selected_model or {})
+            if provider == "Anthropic"
+            else _build_proxy_request_body(raw_body, selected_model)
+        )
+        upstream_request = UrlRequest(
+            endpoint,
+            data=request_body,
+            method="POST",
+            headers=_build_page_agent_proxy_headers(selected_model),
+        )
+
+        try:
+            with urlopen(upstream_request, timeout=120) as upstream_response:
+                content = upstream_response.read()
+                content_type = upstream_response.headers.get("Content-Type", "application/json")
+                content = _normalize_anthropic_response(content) if provider == "Anthropic" else _normalize_page_agent_proxy_response(content, content_type)
+                return Response(content=content, status_code=upstream_response.status, media_type="application/json")
+        except HTTPError as exc:
+            content = exc.read()
+            content_type = exc.headers.get("Content-Type", "application/json") if exc.headers else "application/json"
+            content = _normalize_anthropic_response(content) if provider == "Anthropic" else _normalize_page_agent_proxy_response(content, content_type)
+            if exc.code < 500 and exc.code not in {401, 403, 404, 408, 429}:
+                return Response(content=content, status_code=exc.code, media_type=content_type.split(";")[0])
+            last_error = f"HTTP {exc.code}"
+        except URLError as exc:
+            last_error = str(exc.reason)
+
+        if model_id:
+            from datetime import datetime, timezone
+
+            update_model_status(
+                model_id,
+                {
+                    "status": "unavailable",
+                    "lastError": last_error,
+                    "lastCheckedAt": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+
+    raise HTTPException(status_code=502, detail=f"All configured LLM models are unavailable: {last_error or 'no model configured'}")
 
 
 @app.post("/api/chat/stream", response_model=None)

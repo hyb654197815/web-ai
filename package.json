@@ -31,7 +31,12 @@
       "import": "./dist/agent-widget.js",
       "default": "./dist/agent-widget.js"
     },
-    "./iife": "./dist/agent-widget.iife.js"
+    "./iife": "./dist/agent-widget.iife.js",
+    "./admin": {
+      "import": "./dist/agent-admin.js",
+      "default": "./dist/agent-admin.js"
+    },
+    "./admin-iife": "./dist/agent-admin.iife.js"
   },
   "files": [
     "dist",
@@ -48,13 +53,14 @@
     "readme:npm": "node scripts/sync-readme.js npm",
     "prepack": "node scripts/sync-readme.js npm",
     "postpack": "node scripts/sync-readme.js github",
-    "build": "vite build",
+    "build": "vite build && vite build --config vite.admin.config.js",
     "dev": "vite",
     "preview": "vite preview",
     "webGenerate": "node scripts/webGenerate.js"
   },
   "bin": {
     "portable-ai-agent-widget": "./scripts/webGenerate.js",
+    "webGenerate": "./scripts/webGenerate.js",
     "webgenerate": "./scripts/webGenerate.js"
   },
   "devDependencies": {
