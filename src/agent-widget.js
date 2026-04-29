@@ -527,6 +527,67 @@ function firstTextValue(source, keys) {
   return '';
 }
 
+function extractLooseStringField(source, fieldName) {
+  if (typeof source !== 'string') return '';
+  const pattern = new RegExp(`["']${fieldName}["']\\s*:\\s*["']`, 'i');
+  const match = pattern.exec(source);
+  if (!match || match.index == null) return '';
+
+  let end = source.length;
+  while (end > match.index && /\s/.test(source[end - 1])) end -= 1;
+  while (end > match.index && source[end - 1] === '}') {
+    end -= 1;
+    while (end > match.index && /\s/.test(source[end - 1])) end -= 1;
+  }
+  if (end > match.index && (source[end - 1] === '"' || source[end - 1] === "'")) {
+    end -= 1;
+  }
+
+  return source
+    .slice(match.index + match[0].length, end)
+    .replace(/\\"/g, '"')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .trim();
+}
+
+function normalizePageAgentStringAction(action) {
+  if (typeof action !== 'string') return action;
+
+  const source = action.trim();
+  if (!source) return action;
+
+  const parsed = tryParseJSON(source);
+  if (isPlainObject(parsed)) {
+    return normalizePageAgentAction(parsed);
+  }
+
+  const toolName = [...PAGE_AGENT_TOOL_NAMES].find((name) => new RegExp(`["']?${name}["']?\\s*:`, 'i').test(source));
+  if (!toolName) return action;
+
+  if (toolName === 'done') {
+    const successMatch = source.match(/["']success["']\s*:\s*("?)(true|false|1|0|yes|no|success|fail|成功|失败)\1/i);
+    return {
+      done: {
+        text: extractLooseStringField(source, 'text') || source,
+        success: coerceBooleanValue(successMatch?.[2], true),
+      },
+    };
+  }
+
+  if (toolName === 'ask_user') {
+    return { ask_user: { question: extractLooseStringField(source, 'question') || extractLooseStringField(source, 'text') } };
+  }
+
+  if (toolName === 'wait') {
+    const secondsMatch = source.match(/["']seconds["']\s*:\s*("?)(\d+(?:\.\d+)?)\1/i);
+    return { wait: normalizePageAgentToolInput('wait', { seconds: secondsMatch?.[2] }) };
+  }
+
+  return action;
+}
+
 function normalizePageAgentToolInput(toolName, input) {
   const raw = isPlainObject(input) ? input : {};
 
@@ -585,6 +646,11 @@ function normalizePageAgentToolInput(toolName, input) {
 }
 
 function normalizePageAgentAction(action) {
+  if (typeof action === 'string') {
+    const normalizedStringAction = normalizePageAgentStringAction(action);
+    if (normalizedStringAction !== action) return normalizedStringAction;
+  }
+
   const parsedAction = typeof action === 'string' ? tryParseJSON(action.trim()) || action : action;
   if (!isPlainObject(parsedAction)) return parsedAction;
 
@@ -682,40 +748,44 @@ function repairPageAgentLLMResponsePayload(payload) {
   let changed = false;
 
   payload.choices.forEach((choice) => {
-    if (!isPlainObject(choice) || !isPlainObject(choice.message)) return;
+    if (!isPlainObject(choice)) return;
 
-    if (typeof choice.message.content === 'string') {
-      const normalizedContent = normalizePageAgentJSONText(choice.message.content);
-      if (normalizedContent !== choice.message.content) {
-        choice.message.content = normalizedContent;
-        changed = true;
-      }
-    }
+    [choice.message, choice.delta].forEach((message) => {
+      if (!isPlainObject(message)) return;
 
-    if (!Array.isArray(choice.message.tool_calls)) return;
-
-    choice.message.tool_calls.forEach((toolCall) => {
-      const functionCall = isPlainObject(toolCall?.function) ? toolCall.function : null;
-      if (!functionCall || typeof functionCall.arguments !== 'string') return;
-
-      const normalizedArguments = normalizePageAgentJSONText(functionCall.arguments);
-      const functionName = typeof functionCall.name === 'string' ? functionCall.name.trim() : '';
-      if (PAGE_AGENT_TOOL_NAMES.has(functionName) && functionName !== 'AgentOutput') {
-        const parsedArguments = typeof normalizedArguments === 'string' ? tryParseJSON(normalizedArguments) : normalizedArguments;
-        functionCall.name = 'AgentOutput';
-        functionCall.arguments = JSON.stringify({
-          action: {
-            [functionName]: normalizePageAgentToolInput(functionName, parsedArguments ?? functionCall.arguments),
-          },
-        });
-        changed = true;
-        return;
+      if (typeof message.content === 'string') {
+        const normalizedContent = normalizePageAgentJSONText(message.content);
+        if (normalizedContent !== message.content) {
+          message.content = normalizedContent;
+          changed = true;
+        }
       }
 
-      if (normalizedArguments !== functionCall.arguments) {
-        functionCall.arguments = normalizedArguments;
-        changed = true;
-      }
+      if (!Array.isArray(message.tool_calls)) return;
+
+      message.tool_calls.forEach((toolCall) => {
+        const functionCall = isPlainObject(toolCall?.function) ? toolCall.function : null;
+        if (!functionCall || typeof functionCall.arguments !== 'string') return;
+
+        const normalizedArguments = normalizePageAgentJSONText(functionCall.arguments);
+        const functionName = typeof functionCall.name === 'string' ? functionCall.name.trim() : '';
+        if (PAGE_AGENT_TOOL_NAMES.has(functionName) && functionName !== 'AgentOutput') {
+          const parsedArguments = typeof normalizedArguments === 'string' ? tryParseJSON(normalizedArguments) : normalizedArguments;
+          functionCall.name = 'AgentOutput';
+          functionCall.arguments = JSON.stringify({
+            action: {
+              [functionName]: normalizePageAgentToolInput(functionName, parsedArguments ?? functionCall.arguments),
+            },
+          });
+          changed = true;
+          return;
+        }
+
+        if (normalizedArguments !== functionCall.arguments) {
+          functionCall.arguments = normalizedArguments;
+          changed = true;
+        }
+      });
     });
   });
 

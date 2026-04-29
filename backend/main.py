@@ -1,6 +1,7 @@
 # LangChain Agent backend REST API：与前端 Agent 对接
 import json
 import os
+import re
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -142,6 +143,77 @@ def _first_text(value: Any, keys: tuple[str, ...]) -> str:
     return ""
 
 
+def _extract_loose_string_field(source: str, field_name: str) -> str:
+    if not isinstance(source, str):
+        return ""
+
+    match = re.search(rf"""["']{re.escape(field_name)}["']\s*:\s*["']""", source, flags=re.IGNORECASE)
+    if not match:
+        return ""
+
+    end = len(source)
+    while end > match.end() and source[end - 1].isspace():
+        end -= 1
+    while end > match.end() and source[end - 1] == "}":
+        end -= 1
+        while end > match.end() and source[end - 1].isspace():
+            end -= 1
+    if end > match.end() and source[end - 1] in {"'", '"'}:
+        end -= 1
+
+    return (
+        source[match.end() : end]
+        .replace(r"\"", '"')
+        .replace(r"\n", "\n")
+        .replace(r"\r", "\r")
+        .replace(r"\t", "\t")
+        .strip()
+    )
+
+
+def _normalize_page_agent_string_action(value: str) -> Any:
+    source = value.strip()
+    if not source:
+        return value
+
+    parsed = _parse_json_like(source)
+    if isinstance(parsed, dict):
+        return _normalize_page_agent_action(parsed)
+
+    tool_name = next(
+        (name for name in PAGE_AGENT_TOOL_NAMES if re.search(rf"""["']?{re.escape(name)}["']?\s*:""", source, flags=re.IGNORECASE)),
+        "",
+    )
+    if not tool_name:
+        return value
+
+    if tool_name == "done":
+        success_match = re.search(
+            r"""["']success["']\s*:\s*("?)(true|false|1|0|yes|no|success|fail|成功|失败)\1""",
+            source,
+            flags=re.IGNORECASE,
+        )
+        return {
+            "done": {
+                "text": _extract_loose_string_field(source, "text") or source,
+                "success": _coerce_bool(success_match.group(2) if success_match else None, True),
+            }
+        }
+
+    if tool_name == "ask_user":
+        return {
+            "ask_user": {
+                "question": _extract_loose_string_field(source, "question") or _extract_loose_string_field(source, "text")
+            }
+        }
+
+    if tool_name == "wait":
+        seconds_match = re.search(r"""["']seconds["']\s*:\s*("?)(\d+(?:\.\d+)?)\1""", source, flags=re.IGNORECASE)
+        return {"wait": _normalize_page_agent_tool_input("wait", {"seconds": seconds_match.group(2) if seconds_match else None})}
+
+    return value
+
+
 def _normalize_page_agent_tool_input(tool_name: str, value: Any) -> Any:
     raw = value if isinstance(value, dict) else {}
 
@@ -204,6 +276,11 @@ def _parse_json_like(value: Any) -> Any:
 
 
 def _normalize_page_agent_action(value: Any) -> Any:
+    if isinstance(value, str):
+        normalized_string_action = _normalize_page_agent_string_action(value)
+        if normalized_string_action != value:
+            return normalized_string_action
+
     action = _parse_json_like(value)
     if not isinstance(action, dict):
         return action
@@ -337,47 +414,50 @@ def _repair_page_agent_response_payload(payload: Any) -> tuple[Any, bool]:
 
     changed = False
     for choice in payload["choices"]:
-        if not (_is_plain_object(choice) and _is_plain_object(choice.get("message"))):
-            continue
-        message = choice["message"]
-
-        content = message.get("content")
-        if isinstance(content, str):
-            normalized_content = _normalize_page_agent_json_text(content)
-            if normalized_content != content:
-                message["content"] = normalized_content
-                changed = True
-
-        tool_calls = message.get("tool_calls")
-        if not isinstance(tool_calls, list):
+        if not _is_plain_object(choice):
             continue
 
-        for tool_call in tool_calls:
-            if not _is_plain_object(tool_call):
-                continue
-            function = tool_call.get("function")
-            if not _is_plain_object(function):
-                continue
-            arguments = function.get("arguments")
-            if not isinstance(arguments, str):
+        for message in (choice.get("message"), choice.get("delta")):
+            if not _is_plain_object(message):
                 continue
 
-            normalized_arguments = _normalize_page_agent_json_text(arguments)
-            function_name = function.get("name")
-            if isinstance(function_name, str) and function_name.strip() in PAGE_AGENT_TOOL_NAMES:
-                tool_name = function_name.strip()
-                parsed_arguments = _parse_json_like(normalized_arguments)
-                function["name"] = "AgentOutput"
-                function["arguments"] = json.dumps(
-                    {"action": {tool_name: _normalize_page_agent_tool_input(tool_name, parsed_arguments)}},
-                    ensure_ascii=False,
-                )
-                changed = True
+            content = message.get("content")
+            if isinstance(content, str):
+                normalized_content = _normalize_page_agent_json_text(content)
+                if normalized_content != content:
+                    message["content"] = normalized_content
+                    changed = True
+
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
                 continue
 
-            if normalized_arguments != arguments:
-                function["arguments"] = normalized_arguments
-                changed = True
+            for tool_call in tool_calls:
+                if not _is_plain_object(tool_call):
+                    continue
+                function = tool_call.get("function")
+                if not _is_plain_object(function):
+                    continue
+                arguments = function.get("arguments")
+                if not isinstance(arguments, str):
+                    continue
+
+                normalized_arguments = _normalize_page_agent_json_text(arguments)
+                function_name = function.get("name")
+                if isinstance(function_name, str) and function_name.strip() in PAGE_AGENT_TOOL_NAMES:
+                    tool_name = function_name.strip()
+                    parsed_arguments = _parse_json_like(normalized_arguments)
+                    function["name"] = "AgentOutput"
+                    function["arguments"] = json.dumps(
+                        {"action": {tool_name: _normalize_page_agent_tool_input(tool_name, parsed_arguments)}},
+                        ensure_ascii=False,
+                    )
+                    changed = True
+                    continue
+
+                if normalized_arguments != arguments:
+                    function["arguments"] = normalized_arguments
+                    changed = True
 
     return payload, changed
 
