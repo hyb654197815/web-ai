@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Knowledge Flow Mock</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../assets/css/mockups.css" />
+  </head>
+  <body>
+    <div class="mock-shell">
+      <div class="mock-window">
+        <div class="window-top">
+          <div class="window-dots"><span></span><span></span><span></span></div>
+          <div class="window-title">Knowledge Docs Flow · webGenerate</div>
+          <div class="pill">$webGenerate . --update</div>
+        </div>
+        <div class="panel-grid">
+          <section class="frame">
+            <div class="stack-row" style="justify-content: space-between; align-items: center; margin-bottom: 20px;">
+              <div>
+                <h1 style="font-size: 2rem;">`webAIDocs` 生成与回流</h1>
+                <p class="muted" style="margin-top: 8px;">把业务项目的路由、页面元素和关键流程转成可复用的知识资产。</p>
+              </div>
+              <div class="tag-row">
+                <span class="tag">routes.md</span>
+                <span class="tag">page-xxx.md</span>
+                <span class="tag">incremental sync</span>
+              </div>
+            </div>
+
+            <div class="three-col">
+              <div class="flow-item">
+                <h3>业务项目</h3>
+                <p class="muted" style="margin-top: 10px;">Vue / React 页面源码、路由配置、组件树与交互入口。</p>
+                <div class="list" style="margin-top: 18px;">
+                  <div class="card">
+                    <strong>Router</strong>
+                    <p class="muted">src/router/routes</p>
+                  </div>
+                  <div class="card">
+                    <strong>Views</strong>
+                    <p class="muted">src/views/admin/users/index.vue</p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="flow-item">
+                <h3>webGenerate</h3>
+                <p class="muted" style="margin-top: 10px;">在助手里生成页面知识文档，并支持按变更做增量更新。</p>
+                <div class="code-bar" style="margin-top: 18px;">
+                  <span>Codex: $webGenerate .</span>
+                  <span>Codex: $webGenerate . --update</span>
+                  <span>输出到 webAIDocs/</span>
+                </div>
+              </div>
+
+              <div class="flow-item">
+                <h3>Agent / IDE 复用</h3>
+                <p class="muted" style="margin-top: 10px;">后端 Agent、MCP 工具和 IDE 内部助手读取同一份 `webAIDocs`。</p>
+                <div class="list" style="margin-top: 18px;">
+                  <div class="card">
+                    <strong>FastAPI 后端</strong>
+                    <p class="muted">读取 routes + page docs</p>
+                  </div>
+                  <div class="card">
+                    <strong>MCP</strong>
+                    <p class="muted">list_routes / get_page_doc</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="table-card" style="margin-top: 22px;">
+              <div class="table-head">
+                <div>阶段</div>
+                <div>输入</div>
+                <div>输出</div>
+                <div>目标</div>
+              </div>
+              <div class="table-row">
+                <div>扫描路由</div>
+                <div>框架与路由入口</div>
+                <div>routes.md</div>
+                <div>建立页面地图</div>
+              </div>
+              <div class="table-row">
+                <div>分析页面</div>
+                <div>组件、表单、按钮</div>
+                <div>page-xxx.md</div>
+                <div>沉淀可执行步骤</div>
+              </div>
+              <div class="table-row">
+                <div>增量同步</div>
+                <div>git diff / import 链</div>
+                <div>局部更新文档</div>
+                <div>降低知识维护成本</div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

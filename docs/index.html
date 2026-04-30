@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>portable-ai-agent-widget</title>
+    <meta
+      name="description"
+      content="面向后台与中台系统的页面级 AI Agent 开源接入层，展示能力演示、快速生成文档和前端接入方式。"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./assets/css/site.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <div class="topbar-inner">
+          <a class="brand" href="#overview" aria-label="portable-ai-agent-widget">
+            <span class="brand-mark" aria-hidden="true">
+              <span class="brand-mark-core"></span>
+            </span>
+            <span class="brand-copy">
+              <strong>portable-ai-agent-widget</strong>
+              <span>AI Agent 接入层 · WebGenerate Knowledge Docs</span>
+            </span>
+          </a>
+
+          <div class="topbar-nav">
+            <nav class="section-tabs" aria-label="页面分段">
+              <a href="#overview">概览</a>
+              <a href="#demos">能力演示</a>
+              <a href="#capabilities">核心能力</a>
+              <a href="#quickstart">快速开始</a>
+              <a href="#integration">前端接入</a>
+              <a href="#architecture">架构设计</a>
+            </nav>
+
+            <nav class="external-links" aria-label="外部链接">
+              <a href="https://github.com/hyb654197815/web-ai/blob/main/README.md" target="_blank" rel="noreferrer">文档</a>
+              <a href="https://github.com/hyb654197815/web-ai" target="_blank" rel="noreferrer">GitHub</a>
+              <a href="https://www.npmjs.com/package/portable-ai-agent-widget" target="_blank" rel="noreferrer">npm</a>
+            </nav>
+          </div>
+        </div>
+      </header>
+
+      <main class="main-content">
+        <section class="hero-block" id="overview">
+          <div class="hero-copy">
+            <span class="eyebrow">Open Source Web Agent Layer</span>
+            <h1>让后台页面拥有可控的 AI 操作员</h1>
+            <p class="lead">
+              `portable-ai-agent-widget` 面向后台、中台、运营系统，提供一个可落地的页面级 AI Agent 接入层。
+              它把前端 Widget、FastAPI 后端和 `webGenerate` 知识文档工作流拆成三层，
+              重点解决三件事：回答页面问题、跳转到目标页面、在当前页执行受控动作。
+            </p>
+
+            <div class="badge-row" aria-label="项目信息">
+              <span>MIT License</span>
+              <span>Vite + Vanilla JS</span>
+              <span>FastAPI + LangChain</span>
+              <span>webAIDocs Workflow</span>
+              <span>MCP Ready</span>
+            </div>
+          </div>
+
+          <div class="hero-aside">
+            <article class="hero-card hero-card-primary">
+              <strong>三类核心动作</strong>
+              <p>问答、路由跳转、当前页操作。</p>
+            </article>
+            <article class="hero-card hero-card-secondary">
+              <strong>两条关键链路</strong>
+              <p>业务页面接入 Widget，业务项目生成 `webAIDocs/`。</p>
+            </article>
+            <article class="hero-card hero-card-tertiary">
+              <strong>一个安全边界</strong>
+              <p>前端只执行白名单动作，不向浏览器开放任意脚本能力。</p>
+            </article>
+            <div class="hero-command-list">
+              <span>$webGenerate . --update</span>
+              <span>AIAgent.init({ selfAuth: false })</span>
+              <span>POST /api/chat · /api/chat/stream</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="doc-section" id="demos">
+          <div class="section-heading">
+            <span>Demo</span>
+            <h2>能力演示</h2>
+            <p>把说明留给视频本身，首页只保留最短的能力标签和使用场景。</p>
+          </div>
+
+          <div class="media-grid media-grid-large">
+            <article class="media-card">
+              <video controls preload="metadata" playsinline src="./assets/videos/knowledge-qa.mp4"></video>
+              <div class="media-copy">
+                <h3>知识问答</h3>
+                <p>基于当前路由和 `webAIDocs` 回答页面用途、入口位置和操作路径。</p>
+              </div>
+            </article>
+            <article class="media-card">
+              <video controls preload="metadata" playsinline src="./assets/videos/route-navigation.mp4"></video>
+              <div class="media-copy">
+                <h3>路由跳转</h3>
+                <p>把自然语言目标转成 `navigate` 动作，由前端路由执行跳转。</p>
+              </div>
+            </article>
+            <article class="media-card">
+              <video controls preload="metadata" playsinline src="./assets/videos/form-fill.mp4"></video>
+              <div class="media-copy">
+                <h3>表单填写</h3>
+                <p>把当前页的筛选、输入、确认和按钮点击交给受控动作链处理。</p>
+              </div>
+            </article>
+            <article class="media-card">
+              <video controls preload="metadata" playsinline src="./assets/videos/mcp-capability.mp4"></video>
+              <div class="media-copy">
+                <h3>MCP 能力</h3>
+                <p>后端可继续挂接 MCP 工具，让 Agent 除页面知识外再获得扩展能力。</p>
+              </div>
+            </article>
+            <article class="media-card">
+              <video controls preload="metadata" playsinline src="./assets/videos/generate-docs.mp4"></video>
+              <div class="media-copy">
+                <h3>快速生成文档</h3>
+                <p>通过 `webGenerate` 把业务项目页面沉淀成 `routes.md` 与 `page-xxx.md`。</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="doc-section" id="capabilities">
+          <div class="section-heading">
+            <span>Capabilities</span>
+            <h2>当前 Agent 拥有的能力</h2>
+            <p>这里只保留一句话级别的能力摘要，详细效果直接看上面的演示视频。</p>
+          </div>
+
+          <div class="capability-compact-grid">
+            <article class="compact-card compact-blue">
+              <h3>页面问答</h3>
+              <p>回答当前页面做什么、入口在哪、下一步如何操作。</p>
+            </article>
+            <article class="compact-card compact-violet">
+              <h3>受控导航</h3>
+              <p>把自然语言目标转成页面跳转，不做任意浏览器自动化。</p>
+            </article>
+            <article class="compact-card compact-green">
+              <h3>当前页操作</h3>
+              <p>执行表单填写、筛选查询、按钮点击和弹窗确认等动作。</p>
+            </article>
+            <article class="compact-card compact-cyan">
+              <h3>流式对话</h3>
+              <p>支持持续会话、流式返回和新建 session，而不是每轮从零开始。</p>
+            </article>
+            <article class="compact-card compact-wine">
+              <h3>安全鉴权</h3>
+              <p>支持 `selfAuth` 和服务端 `getToken()` 两种接入模式。</p>
+            </article>
+            <article class="compact-card compact-amber">
+              <h3>知识文档与 MCP</h3>
+              <p>复用 `webAIDocs/`，并可在后端继续挂接 MCP 工具能力。</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="doc-section" id="quickstart">
+          <div class="section-heading">
+            <span>Quick Start</span>
+            <h2>快速开始</h2>
+            <p>推荐按这四步接入，尽量保持和仓库现有 README、Quick Start 一致。</p>
+          </div>
+
+          <div class="steps">
+            <article class="step-card">
+              <span>01</span>
+              <h3>安装工作流</h3>
+              <p>先把 `webGenerate` 安装到你的助手里。</p>
+              <pre><code>npx portable-ai-agent-widget codex install</code></pre>
+            </article>
+            <article class="step-card">
+              <span>02</span>
+              <h3>生成知识文档</h3>
+              <p>在业务项目里生成 `webAIDocs/`，再复制回当前仓库。</p>
+              <pre><code>$webGenerate .
+$webGenerate . --update</code></pre>
+            </article>
+            <article class="step-card">
+              <span>03</span>
+              <h3>启动后端</h3>
+              <p>配置管理员、API Key 和模型，启动 FastAPI 服务。</p>
+              <pre><code>cd backend
+pip install -r requirements.txt
+python main.py</code></pre>
+            </article>
+            <article class="step-card">
+              <span>04</span>
+              <h3>初始化 Widget</h3>
+              <p>在业务前端里调用 `AIAgent.init()` 完成接入。</p>
+              <pre><code>AIAgent.init({
+  backendUrl: "http://localhost:4096/api",
+  apiKey: "sk-your-api-key",
+  routerPush: (route) => router.push(route),
+});</code></pre>
+            </article>
+          </div>
+        </section>
+
+        <section class="doc-section" id="integration">
+          <div class="section-heading">
+            <span>Integration</span>
+            <h2>前端接入</h2>
+            <p>核心接入点只有一个：在业务项目启动阶段初始化 `AIAgent`，并把路由跳转函数传进去。</p>
+          </div>
+
+          <div class="integration-layout">
+            <article class="integration-card integration-shot">
+              <img src="./assets/images/frontend-integration.png" alt="前端接入 AIAgent 的代码截图" />
+            </article>
+            <article class="integration-card integration-copy">
+              <h3>接入时你需要提供的最少信息</h3>
+              <ul class="integration-points">
+                <li>`backendUrl`：后端 API 地址。</li>
+                <li>`apiKey` 或 `getToken()`：开发联调和生产模式二选一。</li>
+                <li>`routerPush(route)`：把 `navigate` 动作接到你的项目路由。</li>
+              </ul>
+              <div class="integration-note">
+                <strong>生产推荐</strong>
+                <p>使用 `selfAuth=false`，由业务服务签发短期 token，不把长期 API Key 下发到浏览器。</p>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="doc-section" id="architecture">
+          <div class="section-heading">
+            <span>Architecture</span>
+            <h2>架构设计</h2>
+            <p>整体结构非常直接：前端承接交互，后端做决策，`webAIDocs` 提供页面知识。</p>
+          </div>
+
+          <div class="architecture-simple">
+            <article class="arch-simple-card">
+              <h3>前端 Widget</h3>
+              <p>负责对话 UI、页面上下文采集和白名单动作执行。</p>
+            </article>
+            <article class="arch-simple-card">
+              <h3>FastAPI 后端</h3>
+              <p>负责鉴权、模型决策、会话接口、MCP 接入和动作裁剪。</p>
+            </article>
+            <article class="arch-simple-card">
+              <h3>`webAIDocs`</h3>
+              <p>负责给 Agent 提供路由、元素和页面流程这三类核心知识输入。</p>
+            </article>
+          </div>
+
+          <div class="flow-strip" aria-label="整体链路">
+            <div>页面提问</div>
+            <div>Widget 发送上下文</div>
+            <div>后端结合知识决策</div>
+            <div>输出问答或动作</div>
+            <div>前端执行白名单动作</div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./assets/js/site.js"></script>
+  </body>
+</html>

@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Widget Runtime</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Segoe UI", "PingFang SC", sans-serif;
+        color: #f5f7ff;
+        background:
+          radial-gradient(circle at top left, rgba(91, 124, 255, 0.24), transparent 28%),
+          linear-gradient(180deg, #09101f 0%, #0a1224 100%);
+      }
+      .shell {
+        padding: 28px;
+      }
+      .app {
+        width: min(1380px, 100%);
+        min-height: 860px;
+        margin: 0 auto;
+        padding: 22px;
+        border-radius: 28px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(10, 17, 33, 0.88);
+        box-shadow: 0 28px 80px rgba(0, 0, 0, 0.38);
+      }
+      .topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 20px;
+        padding-bottom: 18px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      }
+      .topbar strong {
+        display: block;
+        font-size: 28px;
+      }
+      .topbar span {
+        color: rgba(214, 225, 255, 0.72);
+      }
+      .badge {
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: rgba(91, 124, 255, 0.14);
+        color: #dce6ff;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 280px minmax(0, 1fr);
+        gap: 18px;
+      }
+      .panel,
+      .card {
+        border-radius: 22px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .menu {
+        padding: 18px;
+      }
+      .menu div {
+        margin-bottom: 10px;
+        padding: 12px 14px;
+        border-radius: 14px;
+        color: rgba(214, 225, 255, 0.72);
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .menu .active {
+        color: #fff;
+        background: rgba(91, 124, 255, 0.18);
+      }
+      .content {
+        padding: 18px;
+      }
+      .content-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+      }
+      .card {
+        min-height: 120px;
+        padding: 18px;
+      }
+      .card strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 18px;
+      }
+      .card p {
+        margin: 0;
+        color: rgba(214, 225, 255, 0.72);
+        line-height: 1.7;
+      }
+      .wide {
+        grid-column: 1 / -1;
+        min-height: 280px;
+      }
+      .table {
+        margin-top: 14px;
+        border-radius: 16px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1.1fr 1fr 1fr;
+      }
+      .row span {
+        padding: 14px 16px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      }
+      .row.head {
+        background: rgba(255, 255, 255, 0.04);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="app">
+        <div class="topbar">
+          <div>
+            <strong>用户管理工作台</strong>
+            <span>真实 widget bundle 截图背景页，用于展示接入后的运行状态。</span>
+          </div>
+          <div class="badge">AIAgent Runtime</div>
+        </div>
+        <div class="grid">
+          <div class="panel menu">
+            <div class="active">用户管理</div>
+            <div>权限管理</div>
+            <div>日志监控</div>
+            <div>回收站</div>
+            <div>Playwright 报告</div>
+          </div>
+          <div class="panel content">
+            <div class="content-grid">
+              <div class="card">
+                <strong>今日新增用户</strong>
+                <p>128</p>
+              </div>
+              <div class="card">
+                <strong>活跃管理员</strong>
+                <p>16</p>
+              </div>
+              <div class="card">
+                <strong>待处理反馈</strong>
+                <p>7</p>
+              </div>
+              <div class="card wide">
+                <strong>用户列表</strong>
+                <p>这里保留业务后台本身的内容，AIAgent 以悬浮面板形式挂在页面上，不破坏原页面结构。</p>
+                <div class="table">
+                  <div class="row head">
+                    <span>用户名</span>
+                    <span>角色</span>
+                    <span>状态</span>
+                  </div>
+                  <div class="row">
+                    <span>hyb-admin</span>
+                    <span>管理员</span>
+                    <span>active</span>
+                  </div>
+                  <div class="row">
+                    <span>ops-reviewer</span>
+                    <span>审计员</span>
+                    <span>active</span>
+                  </div>
+                  <div class="row">
+                    <span>support-bot</span>
+                    <span>客服</span>
+                    <span>pending</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="../../dist/agent-widget.iife.js"></script>
+    <script>
+      window.addEventListener("load", () => {
+        if (!window.AIAgent) return;
+        window.AIAgent.init({
+          backendUrl: "http://127.0.0.1:4096/api",
+          apiKey: "demo-preview-key",
+          selfAuth: true,
+          stream: false,
+          debug: false
+        });
+        window.AIAgent.open();
+      });
+    </script>
+  </body>
+</html>

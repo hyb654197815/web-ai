@@ -1,46 +1,123 @@
 # Portable AI Agent Widget
 
-`portable-ai-agent-widget` 是一个给前端项目接入页面级 AI Agent 的仓库，包含三部分：
+[![npm version](https://img.shields.io/npm/v/portable-ai-agent-widget)](https://www.npmjs.com/package/portable-ai-agent-widget)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18-43853d)](https://nodejs.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-- 前端运行时 Widget：页面问答、受控路由跳转、当前页操作
-- FastAPI 后端：知识文档读取、动作决策、模型与 MCP 管理
-- `webGenerate` 工作流：生成 `webAIDocs/routes.md` 和 `page-xxx.md`
+一个面向后台、中台、运营系统的页面级 AI Agent 方案。
 
-它适合后台、中台、运营系统这类有明确页面结构和业务流程的 Web 应用。
+它把这件事拆成三层：
 
-## 能力边界
+- 前端 Widget：负责承接对话、接收受控动作
+- FastAPI 后端：负责鉴权、知识检索、模型决策、MCP 管理
+- `webGenerate` 工作流：负责生成 `webAIDocs/routes.md` 和 `page-xxx.md`
 
-- 页面问答
-- 受控导航：`navigate`
-- 当前页操作：`form`
-- 基于 `webAIDocs/` 的页面知识检索
+适合“页面结构清晰、业务流程固定、希望 AI 能回答页面问题并辅助操作”的 Web 应用。
 
-前端只执行白名单动作，不直接执行任意脚本。
+## 核心能力
 
-## 仓库结构
+- 页面问答：基于当前路由和页面知识文档回答业务问题
+- 受控导航：返回 `navigate` 动作，由前端路由执行
+- 当前页操作：返回 `form` 动作，用于表单、筛选、按钮、分页等页面交互
+- 知识文档复用：统一读取 `webAIDocs/`，可同时服务 Widget、Agent、IDE 工作流
 
-```text
-.
-├─ src/                     # Widget 源码
-├─ dist/                    # 前端构建产物
-├─ backend/                 # FastAPI 后端
-├─ scripts/webGenerate.js   # CLI / MCP 入口
-├─ prompts/                 # 提示词
-├─ templates/               # 各平台 skill 模板
-└─ webAIDocs/               # 业务知识文档
-```
+## 安全边界
+
+- 前端只执行白名单动作，不执行任意脚本
+- 不依赖 DOM 注入，不把模型工具能力直接暴露给浏览器
+- 生产环境推荐 `selfAuth=false`，由你自己的服务下发短期 token
+
+## 为什么这个项目适合做开源接入层
+
+- 接入简单：前端只需要初始化一个 `AIAgent`
+- 能力可控：前端动作协议固定，不把“任意自动化”带进线上页面
+- 知识可维护：页面知识落在 `webAIDocs/`，可随业务演进持续更新
+- 架构清晰：前端、后端、知识文档工作流职责分离
+
+## 标准流程
+
+高质量问答依赖高质量 `webAIDocs/`。如果没有先生成并放回仓库，后端虽然能启动，但 Agent 的页面理解和业务回答质量会明显下降。
+
+推荐按下面顺序接入：
+
+1. 用 `webGenerate` 给你的编程助手安装工作流
+2. 在业务项目里运行 `webGenerate` 生成 `webAIDocs/routes.md` 和 `page-xxx.md`
+3. 把生成好的 `webAIDocs/` 复制回当前仓库，供后端 Agent 读取
+4. 启动后端，配置管理员、API Key、模型和 MCP
+5. 在前端项目中接入 Widget
 
 ## 快速开始
 
-### 1. 启动后端
+### 依赖要求
+
+- Node.js `>= 18`
+- Python `3.11+` 推荐
+
+### 1. 安装 `webGenerate` 工作流
+
+例如为 Codex 安装：
+
+```bash
+npx portable-ai-agent-widget codex install
+```
+
+也可以安装到其他助手：
+
+```bash
+npx portable-ai-agent-widget claude install
+npx portable-ai-agent-widget cursor install
+npx portable-ai-agent-widget gemini install
+```
+
+### 2. 生成 `webAIDocs/`
+
+安装完成后，在你的业务项目中触发：
+
+- Codex：`$webGenerate .`
+- Claude / Cursor / Gemini / Trae / Copilot 等：`/webGenerate .`
+
+增量同步：
+
+- Codex：`$webGenerate . --update`
+- 其他助手：`/webGenerate . --update`
+
+固定输出：
+
+- `webAIDocs/routes.md`
+- `webAIDocs/page-xxx.md`
+
+### 3. 把文档复制回当前仓库
+
+这是影响问答质量的关键步骤。后端默认会从当前项目根目录读取 `webAIDocs/`，所以生成完成后，需要把业务项目里的文档复制回本仓库：
+
+```text
+your-business-project/
+└─ webAIDocs/
+   ├─ routes.md
+   └─ page-xxx.md
+
+copy to
+
+portable-ai-agent-widget/
+└─ webAIDocs/
+```
+
+可以理解为：`webGenerate` 负责在业务项目里“产出知识”，当前仓库里的后端负责“消费知识”。
+
+### 4. 启动后端
 
 ```bash
 cd backend
 pip install -r requirements.txt
+
+# macOS / Linux
 cp .env.example .env
+
+# Windows PowerShell
+Copy-Item .env.example .env
 ```
 
-必须先修改 `backend/.env`：
+至少修改这些配置：
 
 ```env
 ADMIN_PASSWORD=your-strong-password
@@ -49,28 +126,45 @@ ACCESS_TOKEN_EXPIRE_MINUTES=15
 ENABLE_ADMIN_BACKEND=true
 ```
 
-然后启动：
+然后启动服务：
 
 ```bash
 python main.py
 ```
 
-默认地址是 `http://localhost:4096`。
+默认地址：
 
-### 2. 创建 API Key
-
-打开 `http://localhost:4096/admin`，用管理员账号登录后，在 `API Keys` 菜单创建一个 Key。
+- 服务地址：`http://localhost:4096`
+- 管理后台：`http://localhost:4096/admin`
 
 说明：
 
-- 若 `ADMIN_PASSWORD` 仍是默认值，管理后台登录会被拒绝
-- 若 `ENABLE_ADMIN_BACKEND=false`，则 `/admin` 与 `/api/admin/*` 都不可访问
+- `ADMIN_USERNAME` 默认是 `admin`
+- 如果 `ADMIN_PASSWORD` 仍是示例默认值，管理后台会拒绝登录
 
-## 前端接入
+### 5. 创建 API Key，并配置模型 / MCP
 
-### 方案 A：`selfAuth=true`，前端自动用 API Key 换 token
+登录 `http://localhost:4096/admin` 后：
 
-这个模式接入最简单，但 `apiKey` 会出现在前端代码或页面配置中。
+1. 打开 `API Keys`
+2. 创建一个新的 Key
+3. 保存生成结果
+4. 根据需要在 `Models`、`Tools & MCP` 中配置模型和工具
+
+说明：
+
+- 如果没有配置可用模型，Agent 无法正常回答
+- 如果业务依赖 MCP 工具，也应该在这一步一起配置
+
+### 6. 安装前端包
+
+```bash
+npm install portable-ai-agent-widget
+```
+
+### 7. 先用开发模式跑通
+
+`selfAuth=true` 适合本地联调，接入路径最短：
 
 ```js
 import AIAgent from "portable-ai-agent-widget";
@@ -85,7 +179,7 @@ AIAgent.init({
 await AIAgent.sendMessage("带我去用户管理");
 ```
 
-IIFE 方式：
+如果你不走打包器，也可以直接用 IIFE：
 
 ```html
 <script
@@ -98,9 +192,9 @@ IIFE 方式：
 ></script>
 ```
 
-### 方案 B：`selfAuth=false`，由你自己的服务提供 token
+## 生产环境推荐接法
 
-这是生产环境推荐方案。前端不再持有 `apiKey`，而是通过你自己的后端获取 access token。
+生产环境建议使用 `selfAuth=false`，不要把 `apiKey` 下发到前端。
 
 ```js
 import AIAgent from "portable-ai-agent-widget";
@@ -119,104 +213,70 @@ AIAgent.init({
     }
 
     const data = await response.json();
-    return data.token;
-  },
-  routerPush: (route) => router.push(route),
-});
-```
-
-说明：
-
-- `selfAuth=true` 时，前端 Agent 会自动调用 `/api/auth/token` 与 `/api/auth/refresh`
-- `selfAuth=false` 时，前端 Agent 不再使用 `apiKey`
-- `selfAuth=false` 时必须提供 `getToken()`，返回值可以是 token 字符串，或 `{ token | accessToken, expiresAt?, expiresIn? }`
-- 当接口返回 `401` 时，Agent 会自动指数退避重试
-- `selfAuth=true` 时会重新用 `apiKey` 认证
-- `selfAuth=false` 时会重新调用 `getToken()`
-
-### 生产环境推荐
-
-生产环境推荐使用 `selfAuth=false`。
-
-原因：
-
-- `selfAuth=true` 需要把 `apiKey` 下发到前端
-- 前端 JS、页面属性、打包产物都可能被反向拿到 `apiKey`
-- 一旦 `apiKey` 泄露，攻击者就能自行换 token 调用 AI 接口
-
-## 你的服务如何提供 `getToken`
-
-推荐做法：
-
-1. 在你自己的后端保存 Widget 的 `apiKey`
-2. 由你自己的后端调用 Widget 后端的 `/api/auth/token`
-3. 只把短期 access token 返回给前端
-4. 前端 Agent 使用 `selfAuth=false + getToken()`
-
-### 示例：你的业务服务对外提供 token 接口
-
-下面是一个最小 FastAPI 示例：
-
-```python
-import os
-import httpx
-from fastapi import FastAPI, HTTPException, Request
-
-app = FastAPI()
-
-WIDGET_BACKEND = os.environ["WIDGET_BACKEND"].rstrip("/")
-WIDGET_API_KEY = os.environ["WIDGET_API_KEY"]
-
-
-@app.post("/internal/agent/token")
-async def issue_agent_token(request: Request):
-    # 这里接你自己的登录态 / 权限校验
-    # 例如：if not request.session.get("user"): raise HTTPException(401, "请先登录")
-
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.post(
-            f"{WIDGET_BACKEND}/api/auth/token",
-            json={"api_key": WIDGET_API_KEY},
-        )
-
-    if response.status_code != 200:
-        raise HTTPException(status_code=502, detail="Widget backend token exchange failed")
-
-    payload = response.json()
-    return {
-        "token": payload["access_token"],
-        "expiresIn": payload.get("expires_in", 900),
-    }
-```
-
-### 前端对接这个接口
-
-```js
-AIAgent.init({
-  backendUrl: "http://localhost:4096/api",
-  selfAuth: false,
-  getToken: async () => {
-    const res = await fetch("/internal/agent/token", {
-      method: "POST",
-      credentials: "include",
-    });
-
-    if (!res.ok) {
-      throw new Error("无法获取 Agent token");
-    }
-
-    const data = await res.json();
     return {
       token: data.token,
       expiresIn: data.expiresIn,
     };
   },
+  routerPush: (route) => router.push(route),
 });
 ```
 
-## 后端接口
+这个模式的好处：
 
-常用接口：
+- 前端不再持有长期 `apiKey`
+- token 过期后，Widget 会自动重新获取
+- 你可以把登录态、权限校验、限流策略留在自己的服务里
+
+完整的鉴权说明和服务端示例见：
+
+- [backend/AUTH_GUIDE.md](./backend/AUTH_GUIDE.md)
+- [QUICK_START.md](./QUICK_START.md)
+
+## `webGenerate` 工作流
+
+`webGenerate` 不直接在 npm 命令里扫描业务页面，而是先把工作流安装到你的助手里，再通过助手命令生成 `webAIDocs/`。
+
+### 安装工作流
+
+例如为 Codex 安装：
+
+```bash
+npx portable-ai-agent-widget codex install
+```
+
+也可以安装到其他助手：
+
+```bash
+npx portable-ai-agent-widget claude install
+npx portable-ai-agent-widget cursor install
+npx portable-ai-agent-widget gemini install
+```
+
+### 生成知识文档
+
+安装完成后，在业务项目中触发：
+
+- Codex：`$webGenerate .`
+- Claude / Cursor / Gemini / Trae / Copilot 等：`/webGenerate .`
+
+增量同步：
+
+- Codex：`$webGenerate . --update`
+- 其他助手：`/webGenerate . --update`
+
+固定输出：
+
+- `webAIDocs/routes.md`
+- `webAIDocs/page-xxx.md`
+
+### 生成后要做什么
+
+生成完成后，请把业务项目中的 `webAIDocs/` 复制回当前仓库，再启动后端或重新生成 Agent 相关配置。
+
+这是因为当前仓库中的后端和本地 Agent 默认读取的是“当前项目根目录下的 `webAIDocs/`”，不是你业务项目中的那一份临时输出。
+
+## 常用接口
 
 - `POST /api/auth/token`
 - `POST /api/auth/refresh`
@@ -227,75 +287,28 @@ AIAgent.init({
 - `GET /api/page-agent/config`
 - `POST /api/page-agent/chat/completions`
 
-鉴权说明：
+鉴权特性：
 
-- Access token 默认有效期 15 分钟，可通过 `ACCESS_TOKEN_EXPIRE_MINUTES` 调整
-- Refresh token 默认有效期 7 天，可通过 `REFRESH_TOKEN_EXPIRE_DAYS` 调整
-- Access/refresh token 都会持续回查绑定的 API Key 是否仍然有效
-- 停用或删除 API Key 后，旧 token 将无法继续调用和刷新
-- 服务端会按 API Key 的 `rate_limit` 执行限流，不再只按 IP 限流
+- Access token 默认有效期 15 分钟
+- Refresh token 默认有效期 7 天
+- Access / refresh token 都会持续回查绑定的 API Key 是否有效
+- 停用或删除 API Key 后，旧 token 会立即失效
+- 服务端按 API Key 的 `rate_limit` 执行限流
 
-## 管理后台
+## 仓库结构
 
-管理后台统一入口：
-
-- `http://localhost:4096/admin`
-
-当前包含：
-
-- `Models`
-- `Tools & MCP`
-- `API Keys`
-- `Stats`
-- `Logs`
-
-可通过环境变量关闭：
-
-```env
-ENABLE_ADMIN_BACKEND=false
+```text
+.
+├─ src/                     # 前端 Widget 源码
+├─ dist/                    # 前端构建产物（ESM + IIFE）
+├─ backend/                 # FastAPI 后端
+├─ scripts/webGenerate.js   # webGenerate CLI / MCP 入口
+├─ prompts/                 # 提示词
+├─ templates/               # 各平台 Skill 模板
+└─ webAIDocs/               # 页面知识文档
 ```
 
-关闭后：
-
-- `/admin`
-- `/admin/agent-admin.iife.js`
-- `/api/auth/login`
-- `/api/admin/*`
-
-都不可访问。
-
-## `webGenerate` 的作用
-
-`webGenerate` 负责把知识文档工作流安装到不同 Agent / IDE 中，不直接在 npm 命令里扫描业务项目。
-
-安装示例：
-
-```bash
-webgenerate codex install
-webgenerate claude install
-webgenerate cursor install
-```
-
-安装后，在业务项目中触发：
-
-```bash
-/webGenerate .
-/webGenerate . --update
-```
-
-Codex 中使用：
-
-```bash
-$webGenerate .
-$webGenerate . --update
-```
-
-生成结果固定在：
-
-- `webAIDocs/routes.md`
-- `webAIDocs/page-xxx.md`
-
-## 开发
+## 本地开发
 
 ```bash
 npm install
@@ -303,11 +316,36 @@ npm run build
 npm run dev
 ```
 
-## 文档
+后端开发：
 
+```bash
+cd backend
+pip install -r requirements.txt
+python main.py
+```
+
+## 命令速查
+
+```bash
+# 构建前端产物
+npm run build
+
+# 本地预览
+npm run dev
+
+# 同步 GitHub README 到 README.md
+npm run readme:github
+
+# 发布前切换 npm README
+npm run readme:npm
+```
+
+## 相关文档
+
+- [QUICK_START.md](./QUICK_START.md)
 - [ARCHITECTURE.md](./ARCHITECTURE.md)
 - [PRINCIPLES.md](./PRINCIPLES.md)
-- [QUICK_START.md](./QUICK_START.md)
+- [backend/README.md](./backend/README.md)
 - [backend/AUTH_GUIDE.md](./backend/AUTH_GUIDE.md)
 
 ## 发布

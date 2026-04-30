@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Widget Console Mock</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../assets/css/mockups.css" />
+  </head>
+  <body>
+    <div class="mock-shell">
+      <div class="mock-window">
+        <div class="window-top">
+          <div class="window-dots"><span></span><span></span><span></span></div>
+          <div class="window-title">Widget 对话面板 · page-level AI agent</div>
+          <div class="pill">selfAuth=false</div>
+        </div>
+        <div class="panel-grid two-col">
+          <aside class="frame side-menu">
+            <span class="active">当前页面</span>
+            <span>用户管理</span>
+            <span>权限配置</span>
+            <span>日志监控</span>
+            <span>Playwright 报告</span>
+          </aside>
+          <section class="frame">
+            <div class="stack-row" style="justify-content: space-between; align-items: center; margin-bottom: 18px;">
+              <div>
+                <h1 style="font-size: 2rem;">AIAgent Console</h1>
+                <p class="muted" style="margin-top: 8px;">在业务后台里回答问题、执行导航动作和当前页表单操作。</p>
+              </div>
+              <div class="tag-row">
+                <span class="tag">navigate</span>
+                <span class="tag">form</span>
+                <span class="tag">knowledge-docs</span>
+              </div>
+            </div>
+
+            <div class="chat">
+              <div class="chat-bubble user">
+                <strong>用户消息</strong>
+                <p>带我去用户管理，然后筛选最近 7 天创建的管理员账号。</p>
+              </div>
+              <div class="chat-bubble agent">
+                <strong>Agent 规划</strong>
+                <p>1. 跳转到 `/admin/users`。</p>
+                <p>2. 打开筛选区，填写角色 = 管理员、创建时间 = 最近 7 天。</p>
+                <p>3. 点击“搜索”，等待表格刷新。</p>
+              </div>
+            </div>
+
+            <div class="code-bar" style="margin-top: 18px;">
+              <span>POST /api/chat</span>
+              <span>action: "navigate" → /admin/users</span>
+              <span>action: "form" → 填写 filters + 点击搜索按钮</span>
+            </div>
+
+            <div class="table-card" style="margin-top: 18px;">
+              <div class="table-head">
+                <div>字段</div>
+                <div>来源</div>
+                <div>状态</div>
+                <div>说明</div>
+              </div>
+              <div class="table-row">
+                <div>pathname</div>
+                <div>前端上下文</div>
+                <div><span class="state info">已注入</span></div>
+                <div>用于路由语义判断</div>
+              </div>
+              <div class="table-row">
+                <div>title</div>
+                <div>页面元信息</div>
+                <div><span class="state info">已注入</span></div>
+                <div>辅助定位当前页</div>
+              </div>
+              <div class="table-row">
+                <div>webAIDocs</div>
+                <div>知识文档</div>
+                <div><span class="state ok">可用</span></div>
+                <div>回答问题与选择元素</div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

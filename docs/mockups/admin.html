@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin Control Mock</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="../assets/css/mockups.css" />
+  </head>
+  <body>
+    <div class="mock-shell">
+      <div class="mock-window">
+        <div class="window-top">
+          <div class="window-dots"><span></span><span></span><span></span></div>
+          <div class="window-title">Admin Backend · API Keys / Models / MCP</div>
+          <div class="pill">http://localhost:4096/admin</div>
+        </div>
+        <div class="panel-grid two-col">
+          <aside class="frame side-menu">
+            <span>Dashboard</span>
+            <span class="active">API Keys</span>
+            <span>Models</span>
+            <span>Tools &amp; MCP</span>
+            <span>Audit</span>
+          </aside>
+          <section class="frame">
+            <div class="stack-row" style="justify-content: space-between; align-items: center; margin-bottom: 18px;">
+              <div>
+                <h1 style="font-size: 2rem;">服务端控制台</h1>
+                <p class="muted" style="margin-top: 8px;">把 API Key、模型和工具能力收敛在后端统一治理，前端只拿短期 token。</p>
+              </div>
+              <div class="tag-row">
+                <span class="tag">JWT</span>
+                <span class="tag">Rate Limit</span>
+                <span class="tag">MCP</span>
+              </div>
+            </div>
+
+            <div class="three-col" style="margin-bottom: 18px;">
+              <div class="card metric">
+                <span class="muted">活跃 API Keys</span>
+                <strong>12</strong>
+                <span class="state ok">全部有效</span>
+              </div>
+              <div class="card metric">
+                <span class="muted">在线模型</span>
+                <strong>4</strong>
+                <span class="state info">OpenAI / Claude / Gemini</span>
+              </div>
+              <div class="card metric">
+                <span class="muted">MCP 服务</span>
+                <strong>3</strong>
+                <span class="state pending">1 个待更新</span>
+              </div>
+            </div>
+
+            <div class="table-card">
+              <div class="table-head">
+                <div>Name</div>
+                <div>Scope</div>
+                <div>Status</div>
+                <div>Rate Limit</div>
+              </div>
+              <div class="table-row">
+                <div>frontend-prod</div>
+                <div>chat / page-agent</div>
+                <div><span class="state ok">active</span></div>
+                <div>120 req/min</div>
+              </div>
+              <div class="table-row">
+                <div>ops-dashboard</div>
+                <div>chat / admin</div>
+                <div><span class="state ok">active</span></div>
+                <div>60 req/min</div>
+              </div>
+              <div class="table-row">
+                <div>staging-agent</div>
+                <div>chat / mcp</div>
+                <div><span class="state pending">rotating</span></div>
+                <div>30 req/min</div>
+              </div>
+            </div>
+
+            <div class="list" style="margin-top: 18px;">
+              <div class="card">
+                <strong>推荐生产接法</strong>
+                <p class="muted" style="margin-top: 8px;">前端 `selfAuth=false`，由你自己的服务调用 `/api/auth/token` 换取短期访问令牌。</p>
+              </div>
+              <div class="card">
+                <strong>安全收益</strong>
+                <p class="muted" style="margin-top: 8px;">停用 API Key 即刻失效旧 token；限流、权限和审计都保留在服务端。</p>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
