@@ -3,34 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Agent Admin</title>
-    <style>
-      html,
-      body {
-        width: 100%;
-        min-height: 100%;
-        margin: 0;
-        background: #111;
-      }
-
-      body {
-        color: #d8d8d8;
-        font-family: "SF Pro Display", "Segoe UI Variable", "PingFang SC", "Microsoft YaHei", sans-serif;
-      }
-
-      .admin-fallback {
-        min-height: 100vh;
-        display: grid;
-        place-items: center;
-        padding: 24px;
-        color: #8f8f8f;
-        font-size: 13px;
-      }
-    </style>
+    <title>AI Agent 管理后台</title>
   </head>
   <body>
     <noscript>
-      <div class="admin-fallback">需要启用 JavaScript 才能打开 Agent 管理端。</div>
+      <div style="padding: 20px; text-align: center; color: #8f8f8f; background: #111; min-height: 100vh; display: grid; place-items: center;">
+        需要启用 JavaScript 才能打开 Agent 管理端。
+      </div>
     </noscript>
     <script src="/admin/agent-admin.iife.js" data-api-base="/api" data-open="true"></script>
   </body>

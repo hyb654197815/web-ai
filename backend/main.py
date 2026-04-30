@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import time
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -10,15 +11,35 @@ from urllib.parse import urlparse
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from agent_runtime import run_agent, stream_agent_events
 from agent_admin import load_admin_config, probe_model, public_admin_config, save_admin_config, select_model_config, update_model_status
-from config import CORS_ORIGINS, PORT, PROJECT_ROOT, REFERENCES_DIR
+from agent_runtime import run_agent, stream_agent_events
+from auth import (
+    ACCESS_TOKEN_EXPIRE_MINUTES,
+    bootstrap_admin_password,
+    create_access_token,
+    create_api_key,
+    create_refresh_token,
+    delete_api_key,
+    exchange_api_key_for_token,
+    get_admin_username,
+    is_default_admin_password,
+    list_api_keys,
+    resolve_token_api_key,
+    update_api_key,
+    verify_access_token,
+    verify_admin_credentials,
+    verify_admin_token,
+    verify_api_key_dependency,
+    verify_token,
+)
+from config import CORS_ORIGINS, ENABLE_ADMIN_BACKEND, PORT, PROJECT_ROOT, REFERENCES_DIR
 from mcp_client import inspect_mcp_server, load_all_mcp_servers, mcp_server_from_payload
+from request_logger import abuse_detector, get_recent_logs, log_api_key_event, log_request, log_security_event, request_stats
 
 app = FastAPI(
     title="便携式前端 AI Agent 后端",
@@ -29,12 +50,84 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
+
+# ==================== 中间件 ====================
+
+
+@app.middleware("http")
+async def logging_middleware(request: Request, call_next):
+    """请求日志和监控中间件"""
+    start_time = time.time()
+    ip = request.client.host
+
+    if not ENABLE_ADMIN_BACKEND and (
+        request.url.path.startswith("/admin")
+        or request.url.path.startswith("/api/admin")
+        or request.url.path == "/api/auth/login"
+    ):
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Not Found"},
+        )
+
+    # 检查速率限制（排除健康检查和静态资源）
+    if not request.url.path.startswith(("/api/health", "/admin")):
+        allowed, reason = abuse_detector.check_rate_limit(ip)
+        if not allowed:
+            log_security_event("rate_limit_exceeded", {"ip": ip, "reason": reason})
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Too many requests", "detail": reason}
+            )
+
+        # 检测可疑模式
+        if abuse_detector.detect_suspicious_pattern(request):
+            log_security_event("suspicious_pattern", {
+                "ip": ip,
+                "path": request.url.path,
+                "user_agent": request.headers.get("user-agent", "")
+            })
+
+    # 处理请求
+    response = None
+    error = None
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        error = str(e)
+        response = JSONResponse(
+            status_code=500,
+            content={"error": "Internal server error"}
+        )
+
+    # 记录日志
+    response_time = time.time() - start_time
+    api_key = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer sk-"):
+        api_key = auth_header.replace("Bearer ", "")
+
+    log_request(
+        request,
+        response.status_code if response else 500,
+        response_time,
+        api_key=api_key,
+        error=error
+    )
+
+    return response
+
 ADMIN_HTML_PATH = PROJECT_ROOT / "backend" / "admin.html"
 ADMIN_SCRIPT_PATH = PROJECT_ROOT / "dist" / "agent-admin.iife.js"
+
+
+def ensure_admin_backend_enabled() -> None:
+    if not ENABLE_ADMIN_BACKEND:
+        raise HTTPException(status_code=404, detail="Admin backend is disabled")
 
 
 class ChatRequest(BaseModel):
@@ -75,6 +168,18 @@ def _model_provider(model_config: dict[str, Any] | None = None) -> str:
     return str((selected or {}).get("provider") or "OpenAI Compatible").strip()
 
 
+def _is_official_openai_base_url(model_config: dict[str, Any] | None = None) -> bool:
+    selected = model_config or select_model_config()
+    base_url = str((selected or {}).get("baseURL") or "").strip()
+    if not base_url:
+        return False
+    try:
+        hostname = (urlparse(base_url).hostname or "").lower()
+    except Exception:
+        return False
+    return hostname.endswith("openai.com")
+
+
 def _build_proxy_request_body(raw_body: bytes, model_config: dict[str, Any] | None = None) -> bytes:
     if not raw_body:
         return raw_body
@@ -87,6 +192,30 @@ def _build_proxy_request_body(raw_body: bytes, model_config: dict[str, Any] | No
     if isinstance(payload, dict):
         selected = model_config or select_model_config()
         payload["model"] = str((selected or {}).get("model") or (selected or {}).get("name") or "").strip()
+
+        # PageAgent 会在某些步骤里发送命名版 tool_choice：
+        # { "type": "function", "function": { "name": "AgentOutput" } }
+        # 一些 OpenAI-compatible 服务并不接受这个结构，只接受 "required"/"auto"。
+        # 这里的代理端只服务 PageAgent，并且当前请求通常只有一个 AgentOutput 工具，
+        # 因此把命名工具选择降级成 required 不会改变行为，但能显著提升兼容性。
+        tool_choice = payload.get("tool_choice")
+        tools = payload.get("tools")
+        if (
+            isinstance(tool_choice, dict)
+            and str(tool_choice.get("type") or "").strip() == "function"
+            and isinstance(tool_choice.get("function"), dict)
+            and isinstance(tools, list)
+            and len(tools) <= 1
+        ):
+            payload["tool_choice"] = "required"
+
+        # 某些 OpenAI-compatible 服务并不支持 GPT 专属扩展字段，
+        # 例如 verbosity / reasoning_effort。对非 OpenAI 官方域名统一裁掉。
+        if not _is_official_openai_base_url(selected):
+            payload.pop("verbosity", None)
+            payload.pop("reasoning_effort", None)
+            payload.pop("parallel_tool_calls", None)
+
         return json.dumps(payload, ensure_ascii=False).encode("utf-8")
     return raw_body
 
@@ -585,9 +714,239 @@ def health():
     return {"status": "ok", "knowledge_dir": REFERENCES_DIR}
 
 
+# ==================== 认证接口 ====================
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=50)
+    password: str = Field(..., min_length=1, max_length=100)
+
+
+class TokenRequest(BaseModel):
+    api_key: str = Field(..., min_length=1, description="API Key")
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str = Field(..., min_length=1, description="刷新 Token")
+
+
+class BootstrapAdminPasswordRequest(BaseModel):
+    username: str | None = Field(None, min_length=1, max_length=50)
+    new_password: str = Field(..., min_length=8, max_length=100)
+    confirm_password: str = Field(..., min_length=8, max_length=100)
+
+
+@app.get("/api/auth/bootstrap-status")
+def auth_bootstrap_status():
+    """获取管理员初始化状态"""
+    ensure_admin_backend_enabled()
+    return {
+        "admin_backend_enabled": True,
+        "requires_password_setup": is_default_admin_password(),
+        "username": get_admin_username(),
+    }
+
+
+@app.post("/api/auth/bootstrap-admin-password")
+def setup_admin_password(body: BootstrapAdminPasswordRequest):
+    """首次启动时设置管理员密码"""
+    ensure_admin_backend_enabled()
+    if body.new_password != body.confirm_password:
+        raise HTTPException(status_code=400, detail="Password confirmation does not match")
+
+    result = bootstrap_admin_password(body.new_password, body.username)
+    log_security_event("admin_password_bootstrapped", {"username": result["username"]})
+    return {
+        "success": True,
+        "username": result["username"],
+    }
+
+
+@app.post("/api/auth/login")
+def login(body: LoginRequest):
+    """管理员登录"""
+    ensure_admin_backend_enabled()
+    if is_default_admin_password():
+        raise HTTPException(status_code=403, detail="Default admin password must be changed before admin login")
+    if not verify_admin_credentials(body.username, body.password):
+        log_security_event("login_failed", {"username": body.username})
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    access_token = create_access_token(data={"sub": body.username, "role": "admin"})
+    refresh_token = create_refresh_token(data={"sub": body.username, "role": "admin"})
+
+    log_security_event("login_success", {"username": body.username})
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+    }
+
+
+@app.post("/api/auth/token")
+def get_token(body: TokenRequest):
+    """使用 API Key 换取 Token"""
+    try:
+        result = exchange_api_key_for_token(body.api_key)
+        log_api_key_event("token_exchanged", body.api_key)
+        return result
+    except HTTPException as e:
+        log_security_event("token_exchange_failed", {"api_key": body.api_key[:10]})
+        raise e
+
+
+@app.post("/api/auth/refresh")
+def refresh_token(body: RefreshTokenRequest):
+    """刷新 Token"""
+    try:
+        payload = verify_token(body.refresh_token, "refresh")
+        if payload.get("role") == "admin":
+            ensure_admin_backend_enabled()
+            if is_default_admin_password():
+                raise HTTPException(status_code=403, detail="Default admin password must be changed before admin login")
+        else:
+            resolve_token_api_key(payload, enforce_rate_limit=False, update_usage=False)
+        token_payload = {
+            "sub": payload["sub"],
+            "role": payload.get("role", "user"),
+        }
+        if payload.get("key_id"):
+            token_payload["key_id"] = payload.get("key_id")
+        if payload.get("api_key"):
+            token_payload["api_key"] = payload.get("api_key")
+        access_token = create_access_token(data=token_payload)
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        }
+    except HTTPException as e:
+        log_security_event("token_refresh_failed", {})
+        raise e
+
+
+# ==================== API Key 管理接口 ====================
+
+
+class CreateAPIKeyRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100, description="API Key 名称")
+    description: str = Field("", max_length=500, description="描述")
+    expires_days: int | None = Field(None, ge=1, le=365, description="有效期（天）")
+    rate_limit: int = Field(100, ge=1, le=1000, description="速率限制（每分钟）")
+
+
+class UpdateAPIKeyRequest(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=100)
+    description: str | None = Field(None, max_length=500)
+    enabled: bool | None = None
+    rate_limit: int | None = Field(None, ge=1, le=1000)
+    expires_days: int | None = Field(None, ge=1, le=365)
+
+
+@app.post("/api/admin/api-keys")
+def create_api_key_endpoint(
+    body: CreateAPIKeyRequest,
+    _: dict = Depends(verify_admin_token)
+):
+    """创建新的 API Key（需要管理员权限）"""
+    ensure_admin_backend_enabled()
+    key_data = create_api_key(
+        name=body.name,
+        description=body.description,
+        expires_days=body.expires_days,
+        rate_limit=body.rate_limit,
+    )
+    log_api_key_event("created", key_data["key"], {"name": body.name})
+    return key_data
+
+
+@app.get("/api/admin/api-keys")
+def list_api_keys_endpoint(_: dict = Depends(verify_admin_token)):
+    """列出所有 API Keys（需要管理员权限）"""
+    ensure_admin_backend_enabled()
+    return {"keys": list_api_keys(include_key=True)}
+
+
+@app.put("/api/admin/api-keys/{api_key}")
+def update_api_key_endpoint(
+    api_key: str,
+    body: UpdateAPIKeyRequest,
+    _: dict = Depends(verify_admin_token)
+):
+    """更新 API Key（需要管理员权限）"""
+    ensure_admin_backend_enabled()
+    updated = update_api_key(
+        api_key=api_key,
+        name=body.name,
+        description=body.description,
+        enabled=body.enabled,
+        rate_limit=body.rate_limit,
+        expires_days=body.expires_days,
+    )
+    log_api_key_event("updated", api_key, body.dict(exclude_none=True))
+    return updated
+
+
+@app.delete("/api/admin/api-keys/{api_key}")
+def delete_api_key_endpoint(
+    api_key: str,
+    _: dict = Depends(verify_admin_token)
+):
+    """删除 API Key（需要管理员权限）"""
+    ensure_admin_backend_enabled()
+    success = delete_api_key(api_key)
+    if not success:
+        raise HTTPException(status_code=404, detail="API key not found")
+    log_api_key_event("deleted", api_key)
+    return {"success": True}
+
+
+# ==================== 日志和监控接口 ====================
+
+
+@app.get("/api/admin/logs")
+def get_logs(
+    log_type: str = Query("request", pattern="^(request|security)$"),
+    limit: int = Query(100, ge=1, le=1000),
+    _: dict = Depends(verify_admin_token)
+):
+    """获取日志（需要管理员权限）"""
+    ensure_admin_backend_enabled()
+    return {"logs": get_recent_logs(log_type, limit)}
+
+
+@app.get("/api/admin/stats")
+def get_stats(_: dict = Depends(verify_admin_token)):
+    """获取统计数据（需要管理员权限）"""
+    ensure_admin_backend_enabled()
+    return {
+        "request_stats": request_stats.get_stats(),
+        "blocked_ips": abuse_detector.get_blocked_ips(),
+        "suspicious_stats": abuse_detector.get_suspicious_stats(),
+    }
+
+
+@app.post("/api/admin/unblock-ip")
+def unblock_ip(
+    ip: str = Query(..., description="要解封的 IP"),
+    _: dict = Depends(verify_admin_token)
+):
+    """解封 IP（需要管理员权限）"""
+    ensure_admin_backend_enabled()
+    abuse_detector.unblock_ip(ip)
+    log_security_event("ip_unblocked", {"ip": ip})
+    return {"success": True}
+
+
+# ==================== 原有接口（保持不变）====================
+
+
 @app.get("/admin", response_class=FileResponse)
 @app.get("/admin/", response_class=FileResponse)
 def agent_admin_page() -> FileResponse:
+    """管理后台首页（模型配置）"""
+    ensure_admin_backend_enabled()
     if not ADMIN_HTML_PATH.exists():
         raise HTTPException(status_code=404, detail="Agent admin HTML is missing")
     return FileResponse(ADMIN_HTML_PATH, media_type="text/html")
@@ -595,6 +954,7 @@ def agent_admin_page() -> FileResponse:
 
 @app.get("/admin/agent-admin.iife.js", response_class=FileResponse)
 def agent_admin_script() -> FileResponse:
+    ensure_admin_backend_enabled()
     if not ADMIN_SCRIPT_PATH.exists():
         raise HTTPException(status_code=404, detail="Run npm run build before opening Agent admin")
     return FileResponse(ADMIN_SCRIPT_PATH, media_type="application/javascript")
@@ -650,7 +1010,9 @@ def _save_mcp_servers_from_payload(payload: dict[str, Any]) -> None:
 
 
 @app.get("/api/admin/config")
-def admin_config() -> dict[str, Any]:
+def admin_config(_: dict = Depends(verify_admin_token)) -> dict[str, Any]:
+    """获取管理配置（需要管理员权限）"""
+    ensure_admin_backend_enabled()
     return {
         **public_admin_config(),
         "mcpServers": _admin_mcp_servers(),
@@ -658,7 +1020,12 @@ def admin_config() -> dict[str, Any]:
 
 
 @app.post("/api/admin/config")
-async def save_admin_config_endpoint(request: Request) -> dict[str, Any]:
+async def save_admin_config_endpoint(
+    request: Request,
+    _: dict = Depends(verify_admin_token)
+) -> dict[str, Any]:
+    """保存管理配置（需要管理员权限）"""
+    ensure_admin_backend_enabled()
     try:
         payload = await request.json()
     except Exception as exc:
@@ -675,7 +1042,12 @@ async def save_admin_config_endpoint(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/admin/models/probe")
-async def admin_probe_model(request: Request) -> dict[str, Any]:
+async def admin_probe_model(
+    request: Request,
+    _: dict = Depends(verify_admin_token)
+) -> dict[str, Any]:
+    """探测模型（需要管理员权限）"""
+    ensure_admin_backend_enabled()
     try:
         payload = await request.json()
     except Exception as exc:
@@ -701,7 +1073,12 @@ async def admin_probe_model(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/admin/mcp/probe")
-async def admin_probe_mcp(request: Request) -> dict[str, Any]:
+async def admin_probe_mcp(
+    request: Request,
+    _: dict = Depends(verify_admin_token)
+) -> dict[str, Any]:
+    """探测 MCP 服务器（需要管理员权限）"""
+    ensure_admin_backend_enabled()
     try:
         payload = await request.json()
     except Exception as exc:
@@ -854,7 +1231,12 @@ def _build_streaming_response(body: ChatRequest, pathname: str, session_id: str)
 
 
 @app.post("/api/chat", response_model=None)
-def chat(body: ChatRequest, stream: bool = Query(False, description="是否启用 SSE 流式输出")) -> Any:
+def chat(
+    body: ChatRequest,
+    stream: bool = Query(False, description="是否启用 SSE 流式输出"),
+    token_data: dict = Depends(verify_access_token)
+) -> Any:
+    """聊天接口（需要 Token 认证）"""
     pathname = _resolve_pathname(body)
     session_id = _resolve_or_create_session_id(body.sessionId)
 
@@ -867,7 +1249,11 @@ def chat(body: ChatRequest, stream: bool = Query(False, description="是否启�
 
 
 @app.post("/api/page-agent/chat/completions", response_model=None)
-async def page_agent_chat_completions(request: Request) -> Response:
+async def page_agent_chat_completions(
+    request: Request,
+    token_data: dict = Depends(verify_access_token)
+) -> Response:
+    """页面代理聊天完成接口（需要 Token 认证）"""
     raw_body = await request.body()
     attempted: set[str] = set()
     last_error = ""
@@ -931,14 +1317,19 @@ async def page_agent_chat_completions(request: Request) -> Response:
 
 
 @app.post("/api/chat/stream", response_model=None)
-def chat_stream(body: ChatRequest) -> StreamingResponse:
+def chat_stream(
+    body: ChatRequest,
+    token_data: dict = Depends(verify_access_token)
+) -> StreamingResponse:
+    """流式聊天接口（需要 Token 认证）"""
     pathname = _resolve_pathname(body)
     session_id = _resolve_or_create_session_id(body.sessionId)
     return _build_streaming_response(body, pathname, session_id=session_id)
 
 
 @app.post("/api/session", response_model=None)
-def create_session() -> dict[str, str]:
+def create_session(token_data: dict = Depends(verify_access_token)) -> dict[str, str]:
+    """创建会话（需要 Token 认证）"""
     session_id = _resolve_or_create_session_id(None)
     return {"id": session_id, "sessionId": session_id}
 
@@ -948,7 +1339,9 @@ def session_message(
     session_id: str,
     body: SessionMessageRequest,
     stream: bool = Query(False, description="是否启用 SSE 流式输出"),
+    token_data: dict = Depends(verify_access_token)
 ) -> Any:
+    """会话消息接口（需要 Token 认证）"""
     message = _resolve_message_or_raise(body.message, body.parts)
     chat_body = ChatRequest(message=message, sessionId=session_id, context=body.context)
     pathname = _resolve_pathname(chat_body)

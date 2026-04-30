@@ -31,6 +31,12 @@ ENV/
 htmlcov/
 
 # Environment and secrets
+agent-admin.json
+api-keys.json
+mcp.json
+backend/.env
+backend/.env.*
+!backend/.env.example
 
 # Logs and runtime files
 *.log

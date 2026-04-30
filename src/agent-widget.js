@@ -43,13 +43,38 @@ export const defaultConfig = {
   stream: true,
   mode: 'auto',
   sessionId: null,
+  apiKey: '',
+  selfAuth: true,
+  getToken: null,
   headers: {},
   debug: true,
+  hidden: false,
 };
+
+const AUTH_STORAGE_PREFIX = 'ai-agent-auth:';
+const ACCESS_TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+const AUTH_RETRY_BASE_DELAY_MS = 300;
+const AUTH_RETRY_MAX_ATTEMPTS = 4;
 
 let config = { ...defaultConfig };
 let pageAgentModulePromise = null;
 let pageAgentRuntimePromise = null;
+let authState = createEmptyAuthState();
+let authStorageKey = null;
+let authRefreshTimer = null;
+let authRefreshPromise = null;
+
+function isManagedApiKeyAuthEnabled() {
+  return config.selfAuth !== false;
+}
+
+function createEmptyAuthState() {
+  return {
+    accessToken: '',
+    refreshToken: '',
+    expiresAt: 0,
+  };
+}
 
 function isPlainObject(value) {
   return Object.prototype.toString.call(value) === '[object Object]';
@@ -364,6 +389,25 @@ function normalizeConfig(opts = {}) {
     next.pageAgentModel = String(next.pageAgentModel).trim() || null;
   }
 
+  if (typeof opts.apiKey !== 'string' && typeof opts.key === 'string') {
+    next.apiKey = opts.key;
+  }
+  if (typeof next.apiKey === 'string') {
+    next.apiKey = next.apiKey.trim();
+  } else if (next.apiKey == null) {
+    next.apiKey = '';
+  } else {
+    next.apiKey = String(next.apiKey).trim();
+  }
+
+  if (typeof next.selfAuth !== 'boolean') {
+    next.selfAuth = defaultConfig.selfAuth;
+  }
+
+  if (typeof next.getToken !== 'function') {
+    next.getToken = null;
+  }
+
   if (!isPlainObject(next.headers)) {
     next.headers = {};
   }
@@ -371,6 +415,8 @@ function normalizeConfig(opts = {}) {
   if (typeof next.debug !== 'boolean') {
     next.debug = defaultConfig.debug;
   }
+
+  next.hidden = opts.hidden === true || opts.hideUI === true || opts.ui === false;
 
   if (typeof next.sessionId === 'string') {
     next.sessionId = next.sessionId.trim() || null;
@@ -381,6 +427,195 @@ function normalizeConfig(opts = {}) {
   }
 
   return next;
+}
+
+function getStorage() {
+  try {
+    return globalObject.localStorage || null;
+  } catch {
+    return null;
+  }
+}
+
+function hashString(value) {
+  const text = String(value || '');
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function buildAuthStorageKey() {
+  if (!isManagedApiKeyAuthEnabled() || !config.apiKey) return null;
+  return `${AUTH_STORAGE_PREFIX}${hashString(`${trimSlash(config.backendUrl)}::${config.apiKey}`)}`;
+}
+
+function stopAuthRefreshTimer() {
+  if (authRefreshTimer) {
+    globalObject.clearTimeout(authRefreshTimer);
+    authRefreshTimer = null;
+  }
+}
+
+function isAccessTokenExpiringSoon() {
+  return !authState.expiresAt || Date.now() >= authState.expiresAt - ACCESS_TOKEN_REFRESH_BUFFER_MS;
+}
+
+function persistAuthState() {
+  const storage = getStorage();
+  if (!storage || !authStorageKey) return;
+  try {
+    storage.setItem(
+      authStorageKey,
+      JSON.stringify({
+        accessToken: authState.accessToken,
+        refreshToken: authState.refreshToken,
+        expiresAt: authState.expiresAt,
+      })
+    );
+  } catch {}
+}
+
+function clearPersistedAuthState() {
+  const storage = getStorage();
+  if (!storage || !authStorageKey) return;
+  try {
+    storage.removeItem(authStorageKey);
+  } catch {}
+}
+
+function clearPersistedAuthStateByKey(storageKey) {
+  const storage = getStorage();
+  if (!storage || !storageKey) return;
+  try {
+    storage.removeItem(storageKey);
+  } catch {}
+}
+
+function applyAuthState(nextState = {}) {
+  authState = {
+    ...createEmptyAuthState(),
+    ...nextState,
+    accessToken: sanitizeText(nextState.accessToken, 5000),
+    refreshToken: sanitizeText(nextState.refreshToken, 5000),
+    expiresAt: Number(nextState.expiresAt) || 0,
+  };
+
+  stopAuthRefreshTimer();
+
+  if (authState.accessToken && authState.expiresAt && !isAccessTokenExpiringSoon()) {
+    const delay = Math.max(1000, authState.expiresAt - Date.now() - ACCESS_TOKEN_REFRESH_BUFFER_MS);
+    authRefreshTimer = globalObject.setTimeout(() => {
+      refreshAgentAccessToken().catch((error) => {
+        logAgent('warn', '自动刷新访问令牌失败', error?.message || error);
+      });
+    }, delay);
+  }
+
+  if (authState.accessToken || authState.refreshToken) {
+    persistAuthState();
+  } else {
+    clearPersistedAuthState();
+  }
+}
+
+function loadAuthStateFromStorage() {
+  const storage = getStorage();
+  if (!storage || !authStorageKey) {
+    applyAuthState();
+    return;
+  }
+
+  try {
+    const raw = storage.getItem(authStorageKey);
+    if (!raw) {
+      applyAuthState();
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    const expiresAt = Number(parsed?.expiresAt) || 0;
+    applyAuthState({
+      accessToken: expiresAt > Date.now() ? parsed?.accessToken : '',
+      refreshToken: parsed?.refreshToken || '',
+      expiresAt,
+    });
+  } catch {
+    applyAuthState();
+  }
+}
+
+function syncAuthStateFromConfig() {
+  const previousStorageKey = authStorageKey;
+  stopAuthRefreshTimer();
+  authRefreshPromise = null;
+  authStorageKey = buildAuthStorageKey();
+  if (!isManagedApiKeyAuthEnabled() || !config.apiKey) {
+    if (previousStorageKey && previousStorageKey !== authStorageKey) {
+      clearPersistedAuthStateByKey(previousStorageKey);
+    }
+    authState = createEmptyAuthState();
+    return;
+  }
+  loadAuthStateFromStorage();
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => globalObject.setTimeout(resolve, Math.max(0, ms)));
+}
+
+function getRetryDelay(attempt) {
+  const safeAttempt = Math.max(0, Number(attempt) || 0);
+  return AUTH_RETRY_BASE_DELAY_MS * (2 ** safeAttempt);
+}
+
+function normalizeProvidedTokenResult(value) {
+  if (typeof value === 'string') {
+    const token = value.trim();
+    if (!token) throw new Error('getToken 返回了空 token');
+    return {
+      accessToken: token,
+      refreshToken: '',
+      expiresAt: 0,
+    };
+  }
+
+  if (!isPlainObject(value)) {
+    throw new Error('getToken 必须返回 token 字符串，或包含 token/accessToken 的对象');
+  }
+
+  const token =
+    typeof value.accessToken === 'string'
+      ? value.accessToken.trim()
+      : typeof value.token === 'string'
+      ? value.token.trim()
+      : '';
+  if (!token) {
+    throw new Error('getToken 返回结果缺少 token');
+  }
+
+  const expiresAt =
+    typeof value.expiresAt === 'number' && Number.isFinite(value.expiresAt)
+      ? value.expiresAt
+      : typeof value.expiresIn === 'number' && Number.isFinite(value.expiresIn)
+      ? Date.now() + value.expiresIn * 1000
+      : 0;
+
+  return {
+    accessToken: token,
+    refreshToken: typeof value.refreshToken === 'string' ? value.refreshToken.trim() : '',
+    expiresAt,
+  };
+}
+
+async function getExternalAccessToken() {
+  if (typeof config.getToken !== 'function') {
+    throw new Error('selfAuth=false 时必须提供 getToken() 函数');
+  }
+
+  const tokenResult = normalizeProvidedTokenResult(await config.getToken());
+  applyAuthState(tokenResult);
+  return authState.accessToken;
 }
 
 function validateInput(text) {
@@ -794,7 +1029,7 @@ function repairPageAgentLLMResponsePayload(payload) {
 
 function createPageAgentCustomFetch() {
   return async (input, init) => {
-    const response = await fetch(input, init);
+    const response = await fetchWithAgentAuth(input, init);
     const contentType = response.headers.get('content-type') || '';
     if (!/application\/json/i.test(contentType)) {
       return response;
@@ -989,15 +1224,221 @@ function withTimeout(timeoutMs) {
   };
 }
 
+function buildHeaders(defaultHeaders = {}, overrideHeaders = {}) {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(defaultHeaders || {})) {
+    if (value != null) headers.set(key, String(value));
+  }
+  for (const [key, value] of Object.entries(config.headers || {})) {
+    if (value != null) headers.set(key, String(value));
+  }
+  const explicitHeaders = new Headers(overrideHeaders || {});
+  explicitHeaders.forEach((value, key) => {
+    headers.set(key, value);
+  });
+  return headers;
+}
+
+function extractErrorMessage(payload, fallback) {
+  if (payload && typeof payload === 'object') {
+    const detail = sanitizeText(payload.detail, 500);
+    if (detail) return detail;
+    const error = sanitizeText(payload.error, 500);
+    if (error) return error;
+    const message = sanitizeText(payload.message, 500);
+    if (message) return message;
+  }
+  return fallback;
+}
+
+async function fetchAuthJSON(path, body) {
+  const { signal, cleanup, hasTimeout } = withTimeout(config.requestTimeoutMs);
+
+  try {
+    const headers = buildHeaders({
+      'Content-Type': 'application/json',
+    });
+    headers.delete('Authorization');
+    const response = await fetch(`${trimSlash(config.backendUrl)}${path}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal,
+    });
+
+    const rawText = await response.text();
+    const parsed = tryParseJSON(rawText);
+    const payload = parsed ?? { message: rawText };
+
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(payload, `认证请求失败（${response.status}）`));
+    }
+
+    return payload;
+  } catch (error) {
+    if (hasTimeout && error.name === 'AbortError') {
+      throw new Error(`请求超时（${config.requestTimeoutMs}ms）`);
+    }
+    throw error;
+  } finally {
+    cleanup();
+  }
+}
+
+async function exchangeApiKeyForToken() {
+  if (!isManagedApiKeyAuthEnabled()) {
+    return getExternalAccessToken();
+  }
+  if (!config.apiKey) return '';
+  const payload = await fetchAuthJSON('/auth/token', { api_key: config.apiKey });
+  const expiresIn = Number(payload?.expires_in) || 3600;
+  applyAuthState({
+    accessToken: payload?.access_token || '',
+    refreshToken: payload?.refresh_token || '',
+    expiresAt: Date.now() + expiresIn * 1000,
+  });
+  return authState.accessToken;
+}
+
+async function refreshAgentAccessToken(options = {}) {
+  const forceRefresh = options.forceRefresh === true;
+
+  if (!isManagedApiKeyAuthEnabled()) {
+    if (!forceRefresh && authState.accessToken) {
+      return authState.accessToken;
+    }
+    return getExternalAccessToken();
+  }
+
+  if (!config.apiKey) return '';
+  if (forceRefresh) {
+    applyAuthState({
+      accessToken: '',
+      refreshToken: authState.refreshToken,
+      expiresAt: 0,
+    });
+  }
+  if (!authState.refreshToken) {
+    return exchangeApiKeyForToken();
+  }
+
+  try {
+    const payload = await fetchAuthJSON('/auth/refresh', {
+      refresh_token: authState.refreshToken,
+    });
+    const expiresIn = Number(payload?.expires_in) || 3600;
+    applyAuthState({
+      accessToken: payload?.access_token || '',
+      refreshToken: payload?.refresh_token || authState.refreshToken,
+      expiresAt: Date.now() + expiresIn * 1000,
+    });
+    return authState.accessToken;
+  } catch (error) {
+    logAgent('warn', '刷新访问令牌失败，准备重新换取令牌', error?.message || error);
+    return exchangeApiKeyForToken();
+  }
+}
+
+async function ensureAgentAccessToken(options = {}) {
+  const forceRefresh = options.forceRefresh === true;
+
+  if (!isManagedApiKeyAuthEnabled()) {
+    if (!forceRefresh && authState.accessToken) {
+      return authState.accessToken;
+    }
+    if (!authRefreshPromise) {
+      authRefreshPromise = refreshAgentAccessToken({ forceRefresh }).finally(() => {
+        authRefreshPromise = null;
+      });
+    }
+    return authRefreshPromise;
+  }
+
+  if (!config.apiKey) return '';
+  if (!forceRefresh && authState.accessToken && !isAccessTokenExpiringSoon()) {
+    return authState.accessToken;
+  }
+  if (!authRefreshPromise) {
+    authRefreshPromise = refreshAgentAccessToken({ forceRefresh }).finally(() => {
+      authRefreshPromise = null;
+    });
+  }
+  return authRefreshPromise;
+}
+
+async function fetchWithAgentAuth(input, init = {}) {
+  const headers = buildHeaders({}, init.headers);
+  const requestInit = {
+    ...init,
+    headers,
+  };
+
+  const usingExplicitAuthorization = headers.has('Authorization');
+  if (!usingExplicitAuthorization && !isManagedApiKeyAuthEnabled() && typeof config.getToken !== 'function') {
+    throw new Error('selfAuth=false 时必须提供 getToken() 函数');
+  }
+  const shouldAttachAgentToken =
+    !usingExplicitAuthorization &&
+    ((isManagedApiKeyAuthEnabled() && !!config.apiKey) || (!isManagedApiKeyAuthEnabled() && typeof config.getToken === 'function'));
+
+  if (shouldAttachAgentToken) {
+    const token = await ensureAgentAccessToken();
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+  }
+
+  let response = await fetch(input, requestInit);
+  if (response.status !== 401 || !shouldAttachAgentToken) {
+    return response;
+  }
+
+  let lastAuthError = null;
+  for (let attempt = 0; attempt < AUTH_RETRY_MAX_ATTEMPTS; attempt += 1) {
+    applyAuthState({
+      accessToken: '',
+      refreshToken: isManagedApiKeyAuthEnabled() ? authState.refreshToken : '',
+      expiresAt: 0,
+    });
+
+    const delay = getRetryDelay(attempt);
+    if (delay > 0) {
+      await sleep(delay);
+    }
+
+    let token = '';
+    try {
+      token = await ensureAgentAccessToken({ forceRefresh: true });
+      lastAuthError = null;
+    } catch (error) {
+      lastAuthError = error;
+      continue;
+    }
+    if (!token) {
+      break;
+    }
+
+    headers.set('Authorization', `Bearer ${token}`);
+    response = await fetch(input, requestInit);
+    if (response.status !== 401) {
+      return response;
+    }
+  }
+
+  if (lastAuthError) {
+    throw lastAuthError;
+  }
+  return response;
+}
+
 async function postJSON(url, body) {
   const { signal, cleanup, hasTimeout } = withTimeout(config.requestTimeoutMs);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetchWithAgentAuth(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...config.headers,
       },
       body: JSON.stringify(body),
       signal,
@@ -1026,11 +1467,10 @@ async function getJSON(url) {
   const { signal, cleanup, hasTimeout } = withTimeout(config.requestTimeoutMs);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetchWithAgentAuth(url, {
       method: 'GET',
       headers: {
         Accept: 'application/json',
-        ...config.headers,
       },
       signal,
     });
@@ -1163,12 +1603,11 @@ async function postSSE(url, body, onEvent) {
   const { signal, cleanup, hasTimeout } = withTimeout(config.requestTimeoutMs);
 
   try {
-    const response = await fetch(url, {
+    const response = await fetchWithAgentAuth(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
-        ...config.headers,
       },
       body: JSON.stringify(body),
       signal,
@@ -1406,6 +1845,10 @@ function createStyles() {
     .ai-agent-root *:focus-visible {
       outline: 2px solid rgba(37, 99, 235, 0.36);
       outline-offset: 2px;
+    }
+
+    .ai-agent-root.hidden {
+      display: none;
     }
 
     .ai-agent-panel {
@@ -1917,20 +2360,155 @@ function createStyles() {
       background: rgba(219, 234, 254, 0.58);
     }
 
+    .ai-agent-thinking-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .ai-agent-thinking-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .ai-agent-thinking-title::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: #2563eb;
+      box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.12);
+    }
+
+    .ai-agent-thinking-count {
+      flex-shrink: 0;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(37, 99, 235, 0.1);
+      color: #1e40af;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
     .ai-agent-thinking summary::-webkit-details-marker { display: none; }
 
     .ai-agent-thinking-body {
-      display: block;
-      padding: 10px 14px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 12px 12px;
       font-size: 12px;
       color: #334155;
-      white-space: pre-wrap;
       word-break: break-word;
-      border-radiu: 20px;
     }
 
-    .ai-agent-thinking-body.warn {
+    .ai-agent-thinking-card {
+      position: relative;
+      overflow: hidden;
+      padding: 10px 12px 10px 14px;
+      border: 1px solid rgba(191, 219, 254, 0.52);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.76);
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.04);
+    }
+
+    .ai-agent-thinking-card::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      background: #2563eb;
+    }
+
+    .ai-agent-thinking-card.warn {
+      border-color: rgba(252, 165, 165, 0.62);
+      color: #991b1b;
+      background: rgba(254, 242, 242, 0.88);
+    }
+
+    .ai-agent-thinking-card.warn::before {
+      background: #ef4444;
+    }
+
+    .ai-agent-thinking-card.tool::before {
+      background: #7c3aed;
+    }
+
+    .ai-agent-thinking-card.mcp::before {
+      background: #0f766e;
+    }
+
+    .ai-agent-thinking-card.observation::before {
+      background: #0284c7;
+    }
+
+    .ai-agent-thinking-card.pending::before {
+      background: #64748b;
+    }
+
+    .ai-agent-thinking-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+
+    .ai-agent-thinking-card-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 700;
+      color: #0f172a;
+    }
+
+    .ai-agent-thinking-card.warn .ai-agent-thinking-card-title {
+      color: #991b1b;
+    }
+
+    .ai-agent-thinking-card-badge {
+      flex-shrink: 0;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(37, 99, 235, 0.1);
+      color: #1d4ed8;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+
+    .ai-agent-thinking-card.tool .ai-agent-thinking-card-badge {
+      background: rgba(124, 58, 237, 0.1);
+      color: #6d28d9;
+    }
+
+    .ai-agent-thinking-card.mcp .ai-agent-thinking-card-badge {
+      background: rgba(15, 118, 110, 0.1);
+      color: #0f766e;
+    }
+
+    .ai-agent-thinking-card.warn .ai-agent-thinking-card-badge {
+      background: rgba(239, 68, 68, 0.12);
       color: #b91c1c;
+    }
+
+    .ai-agent-thinking-card-text {
+      margin: 0;
+      color: #475569;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .ai-agent-thinking-card.warn .ai-agent-thinking-card-text {
+      color: #991b1b;
     }
 
     .ai-agent-msg.error {
@@ -1950,7 +2528,7 @@ function createStyles() {
 
     .ai-agent-input-shell {
       display: flex;
-      align-items: center;
+      align-items: flex-end;
       gap: 10px;
       padding: 8px;
       border-radius: 20px;
@@ -1968,8 +2546,15 @@ function createStyles() {
       background: transparent;
       padding: 12px 14px;
       font-size: 14px;
+      line-height: 1.5;
       color: var(--ai-agent-text);
       outline: none;
+      resize: none;
+      overflow-y: auto;
+      max-height: 132px;
+      min-height: 44px;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
     .ai-agent-input:focus,
@@ -2197,7 +2782,7 @@ function createWidgetHTML() {
         <div class="ai-agent-messages" data-role="messages"></div>
         <div class="ai-agent-input-wrap">
           <div class="ai-agent-input-shell">
-            <input class="ai-agent-input" data-role="input" type="text" maxlength="${MAX_MESSAGE_LENGTH}" placeholder="问我这个页面怎么用，或直接说你想去哪里" />
+            <textarea class="ai-agent-input" data-role="input" rows="1" maxlength="${MAX_MESSAGE_LENGTH}" wrap="soft" placeholder="问我这个页面怎么用，或直接说你想去哪里"></textarea>
             <button class="ai-agent-send" data-role="send" type="button">发送</button>
           </div>
         </div>
@@ -2286,6 +2871,12 @@ function scrollMessagesToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+function resizeMessageInput() {
+  if (!inputEl) return;
+  inputEl.style.height = 'auto';
+  inputEl.style.height = `${Math.min(inputEl.scrollHeight, 132)}px`;
+}
+
 function appendMessage(text, role) {
   if (!messagesEl || typeof document === 'undefined') return;
 
@@ -2338,6 +2929,7 @@ function handleMessagesAreaClick(event) {
 
   if (inputEl) {
     inputEl.value = prompt;
+    resizeMessageInput();
     inputEl.focus();
   }
 
@@ -2370,7 +2962,20 @@ function appendThinkingPanel() {
   details.open = false;
 
   const summary = document.createElement('summary');
-  summary.textContent = '思考过程';
+  const summaryWrap = document.createElement('span');
+  summaryWrap.className = 'ai-agent-thinking-summary';
+
+  const summaryTitle = document.createElement('span');
+  summaryTitle.className = 'ai-agent-thinking-title';
+  summaryTitle.textContent = '思考过程';
+
+  const summaryCount = document.createElement('span');
+  summaryCount.className = 'ai-agent-thinking-count';
+  summaryCount.textContent = '准备中';
+
+  summaryWrap.appendChild(summaryTitle);
+  summaryWrap.appendChild(summaryCount);
+  summary.appendChild(summaryWrap);
 
   const body = document.createElement('div');
   body.className = 'ai-agent-thinking-body';
@@ -2381,9 +2986,27 @@ function appendThinkingPanel() {
   messagesEl.appendChild(wrap);
   scrollMessagesToBottom();
 
-  let combinedText = '';
-  let lastStage = '';
-  let lastTitle = '';
+  let cardCount = 0;
+  let pendingCard = null;
+
+  function classifyThinkingCard(type, stage, title, text) {
+    if (type === 'warn') return { kind: 'warn', label: 'Error' };
+
+    const source = `${stage} ${title} ${text}`;
+    if (/mcp[_\s-]|MCP/.test(source)) {
+      return { kind: 'mcp', label: 'MCP' };
+    }
+    if (stage === 'observation') {
+      return { kind: 'observation', label: 'Result' };
+    }
+    if (stage === 'action' || /工具|tool/i.test(source)) {
+      return { kind: 'tool', label: 'Tool' };
+    }
+    if (stage === 'pending') {
+      return { kind: 'pending', label: 'Pending' };
+    }
+    return { kind: 'reason', label: 'Reason' };
+  }
 
   function addLine(text, type = 'info', meta = {}) {
     if (!text || typeof text !== 'string') return;
@@ -2393,28 +3016,51 @@ function appendThinkingPanel() {
 
     const stage = typeof meta.stage === 'string' ? meta.stage.trim() : '';
     const title = typeof meta.title === 'string' ? meta.title.trim() : '';
-    const sameGroup = combinedText && stage && stage === lastStage;
-    const sameTitle = combinedText && title && title === lastTitle;
+    const displayTitle = title || (stage === 'observation' ? '工具结果' : '模型推理');
+    const displayText = nextText === displayTitle ? '处理中...' : nextText;
+    const { kind, label } = classifyThinkingCard(type, stage, displayTitle, displayText);
 
-    if (combinedText === '模型处理中...' && lastStage === 'pending' && stage && stage !== 'pending') {
-      combinedText = nextText;
-    } else if (!combinedText) {
-      combinedText = nextText;
-    } else if (sameGroup || sameTitle) {
-      combinedText += `\n${nextText}`;
-    } else {
-      combinedText += `\n\n${nextText}`;
+    if (pendingCard && stage && stage !== 'pending') {
+      pendingCard.remove();
+      pendingCard = null;
+      cardCount = Math.max(0, cardCount - 1);
     }
 
-    body.className = `ai-agent-thinking-body ${type}`;
-    body.textContent = combinedText;
-    lastStage = stage || lastStage;
-    lastTitle = title || lastTitle;
+    const card = document.createElement('article');
+    card.className = `ai-agent-thinking-card ${kind}${type === 'warn' ? ' warn' : ''}`;
+
+    const head = document.createElement('div');
+    head.className = 'ai-agent-thinking-card-head';
+
+    const titleEl = document.createElement('div');
+    titleEl.className = 'ai-agent-thinking-card-title';
+    titleEl.textContent = displayTitle;
+
+    const badge = document.createElement('span');
+    badge.className = 'ai-agent-thinking-card-badge';
+    badge.textContent = label;
+
+    const textEl = document.createElement('p');
+    textEl.className = 'ai-agent-thinking-card-text';
+    textEl.textContent = displayText;
+
+    head.appendChild(titleEl);
+    head.appendChild(badge);
+    card.appendChild(head);
+    card.appendChild(textEl);
+    body.appendChild(card);
+
+    if (stage === 'pending') {
+      pendingCard = card;
+    }
+
+    cardCount += 1;
+    summaryCount.textContent = `${cardCount} 项`;
     scrollMessagesToBottom();
   }
 
   function finish() {
-    summary.textContent = '思考过程';
+    summaryCount.textContent = cardCount ? `${cardCount} 项` : '已完成';
   }
 
   return { addLine, finish };
@@ -2527,6 +3173,7 @@ async function executeFormAction(actionObj) {
     baseURL: runtime.baseURL,
     apiKey: '',
     model: runtime.model,
+    disableNamedToolChoice: true,
     customFetch: createPageAgentCustomFetch(),
     language: resolvePageAgentLanguage(),
     promptForNextTask: false,
@@ -2630,6 +3277,7 @@ async function processMessage(rawText, options = {}) {
 
   if (options.clearInput !== false && inputEl) {
     inputEl.value = '';
+    resizeMessageInput();
   }
 
   appendMessage(text, 'user');
@@ -2667,12 +3315,14 @@ async function processMessage(rawText, options = {}) {
     const backendMessage = extractMessageFromPayload(payload);
 
     if (!action) {
-      appendMessage(backendMessage || '后端未返回可执行指令', 'assistant');
-      return { action: null, payload };
+      const final = backendMessage || '后端未返回可执行指令';
+      appendMessage(final, 'assistant');
+      return { action: null, payload, final };
     }
 
     const result = await applyResolvedAction(action, backendMessage);
-    return { ...result, payload };
+    const final = backendMessage || action.message || result.execution?.message || '';
+    return { ...result, payload, final };
   } catch (error) {
     thinkingPanel.finish();
     appendMessage(`请求失败：${error.message || '网络错误'}`, 'error');
@@ -2870,6 +3520,7 @@ function startDragging(event, kind, target, handle) {
 }
 
 function openWidget() {
+  if (config.hidden) return;
   if (!panelEl || !triggerBtn) return;
   panelEl.classList.remove('hidden');
   syncPanelPosition({ alignToTrigger: !hasCustomPanelPosition });
@@ -2880,8 +3531,32 @@ function openWidget() {
 function closeWidget() {
   if (!panelEl || !triggerBtn) return;
   panelEl.classList.add('hidden');
-  triggerBtn.classList.remove('hidden');
+  if (!config.hidden) {
+    triggerBtn.classList.remove('hidden');
+  }
   syncTriggerPosition();
+}
+
+function applyWidgetVisibility() {
+  if (!hostEl) return;
+  hostEl.style.display = config.hidden ? 'none' : '';
+  hostEl.setAttribute('aria-hidden', config.hidden ? 'true' : 'false');
+  if (!config.hidden) {
+    syncFloatingLayout();
+  }
+}
+
+function hideAgentUI() {
+  config.hidden = true;
+  applyWidgetVisibility();
+}
+
+function showAgentUI(options = {}) {
+  config.hidden = false;
+  applyWidgetVisibility();
+  if (options.openWidget === true || options.open === true) {
+    openWidget();
+  }
 }
 
 async function startNewSession(options = {}) {
@@ -2981,28 +3656,71 @@ function initWidget() {
   });
 
   inputEl.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && !event.isComposing) {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
       processMessage(inputEl.value).catch(() => {});
     }
   });
 
+  inputEl.addEventListener('input', resizeMessageInput);
+
   globalObject.addEventListener('resize', syncFloatingLayout);
 
   appendWelcomeMessage();
+  applyWidgetVisibility();
 }
 
 const AIAgent = {
   init(options = {}) {
     config = normalizeConfig(options);
     pageAgentRuntimePromise = null;
+    syncAuthStateFromConfig();
     initWidget();
+    applyWidgetVisibility();
     return this;
   },
 
   async sendMessage(text, options = {}) {
     initWidget();
-    openWidget();
-    return processMessage(text, options);
+    if (options.openWidget !== false) {
+      openWidget();
+    }
+    const result = await processMessage(text, options);
+    if (options.returnDetails === true || options.details === true) {
+      return result;
+    }
+    return result.final || extractMessageFromPayload(result.payload) || '';
+  },
+
+  hide() {
+    initWidget();
+    hideAgentUI();
+    return this;
+  },
+
+  hideUI() {
+    return this.hide();
+  },
+
+  show(options = {}) {
+    initWidget();
+    showAgentUI(options);
+    return this;
+  },
+
+  showUI(options = {}) {
+    return this.show(options);
+  },
+
+  open() {
+    initWidget();
+    showAgentUI({ open: true });
+    return this;
+  },
+
+  close() {
+    closeWidget();
+    return this;
   },
 
   async execute(payload, options = {}) {
@@ -3039,6 +3757,34 @@ const AIAgent = {
     return config.sessionId;
   },
 
+  setApiKey(apiKey) {
+    config = normalizeConfig({ ...config, apiKey });
+    pageAgentRuntimePromise = null;
+    syncAuthStateFromConfig();
+    return this;
+  },
+
+  setSelfAuth(selfAuth) {
+    config = normalizeConfig({ ...config, selfAuth });
+    syncAuthStateFromConfig();
+    return this;
+  },
+
+  setTokenProvider(getToken) {
+    config = normalizeConfig({ ...config, getToken, selfAuth: false });
+    syncAuthStateFromConfig();
+    return this;
+  },
+
+  clearAuth() {
+    applyAuthState();
+    return this;
+  },
+
+  async authenticate() {
+    return ensureAgentAccessToken();
+  },
+
   getConfig() {
     return { ...config };
   },
@@ -3059,8 +3805,13 @@ function getAutoInitConfig(script) {
   if (script.dataset.pageAgentConfigPath) cfg.pageAgentConfigPath = script.dataset.pageAgentConfigPath;
   if (script.dataset.pageAgentLlmBasePath) cfg.pageAgentLLMBasePath = script.dataset.pageAgentLlmBasePath;
   if (script.dataset.pageAgentModel) cfg.pageAgentModel = script.dataset.pageAgentModel;
+  if (script.dataset.apiKey) cfg.apiKey = script.dataset.apiKey;
+  if (!cfg.apiKey && script.dataset.key) cfg.apiKey = script.dataset.key;
+  if (typeof script.dataset.selfAuth === 'string') cfg.selfAuth = script.dataset.selfAuth !== 'false';
   if (script.dataset.sessionId) cfg.sessionId = script.dataset.sessionId;
   if (typeof script.dataset.stream === 'string') cfg.stream = script.dataset.stream !== 'false';
+  if (typeof script.dataset.hidden === 'string') cfg.hidden = script.dataset.hidden !== 'false';
+  if (typeof script.dataset.hideUi === 'string') cfg.hideUI = script.dataset.hideUi !== 'false';
 
   return cfg;
 }

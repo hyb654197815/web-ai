@@ -66,5 +66,8 @@ MODEL_NAME = os.environ.get("OPENAI_MODEL_NAME", "")
 # CORS：允许的前端来源，逗号分隔
 CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*").strip().split(",") if os.environ.get("CORS_ORIGINS") else ["*"]
 
+# 是否启用管理后台与管理接口
+ENABLE_ADMIN_BACKEND = os.environ.get("ENABLE_ADMIN_BACKEND", "true").strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
 # 服务端口
 PORT = int(os.environ.get("PORT", "4096"))

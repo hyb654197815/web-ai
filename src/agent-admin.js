@@ -14,6 +14,52 @@ function trimSlash(value) {
   return String(value || '').replace(/\/+$/, '');
 }
 
+function maskApiKey(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (text.includes('...')) return text;
+  if (text.length <= 14) return text;
+  return `${text.slice(0, 10)}...${text.slice(-4)}`;
+}
+
+function getApiKeyIdentifier(entry) {
+  if (!entry || typeof entry !== 'object') return '';
+  return String(entry.key || entry.api_key || '').trim();
+}
+
+function normalizeApiKeysPayload(payload) {
+  const list = Array.isArray(payload) ? payload : Array.isArray(payload?.keys) ? payload.keys : [];
+  return list
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => ({
+      ...item,
+      key: getApiKeyIdentifier(item),
+      api_key: String(item.api_key || maskApiKey(item.key || '')).trim(),
+      usage_count: Number(item.usage_count ?? item.total_requests ?? 0) || 0,
+      total_requests: Number(item.total_requests ?? item.usage_count ?? 0) || 0,
+    }));
+}
+
+function normalizeStatsPayload(payload) {
+  const requestStats = payload?.request_stats && typeof payload.request_stats === 'object' ? payload.request_stats : {};
+  const latestKey = Object.keys(requestStats).sort().slice(-1)[0];
+  const latest = latestKey && requestStats[latestKey] && typeof requestStats[latestKey] === 'object' ? requestStats[latestKey] : {};
+  return {
+    ...payload,
+    today_requests: Number(latest.total || 0),
+    today_success: Number(latest.success || 0),
+    today_failed: Number(latest.failed || 0),
+    blocked_ips: Array.isArray(payload?.blocked_ips) ? payload.blocked_ips : [],
+  };
+}
+
+function formatDateTime(value, fallback = '--') {
+  if (!value) return fallback;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return fallback;
+  return date.toLocaleString('zh-CN');
+}
+
 function escapeHTML(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -79,13 +125,24 @@ export const AIAgentAdmin = {
   host: null,
   shadowRoot: null,
   state: clone(DEFAULT_ADMIN_STATE),
-  activeView: 'mcp',
+  activeView: 'models',
   backendUrl: 'http://localhost:4096/api',
   busy: false,
   mcpFormEditor: null,
   modelFormEditor: null,
   autoProbeTimer: null,
   autoProbeRunning: false,
+
+  // Authentication state
+  accessToken: null,
+  refreshToken: null,
+  apiKeys: [],
+  stats: null,
+  logs: [],
+  apiKeyFormEditor: null,
+  requiresPasswordSetup: false,
+  bootstrapUsername: 'admin',
+  authBootstrapLoading: false,
 
   open(options = {}) {
     if (typeof document === 'undefined') return this;
@@ -94,6 +151,15 @@ export const AIAgentAdmin = {
     }
     this.ensure();
     this.host.hidden = false;
+
+    // Check authentication
+    if (!this.checkAuth()) {
+      this.activeView = 'login';
+      this.render();
+      this.loadBootstrapStatus().catch(() => {});
+      return this;
+    }
+
     this.refresh().catch(() => {
       this.render();
     });
@@ -119,13 +185,184 @@ export const AIAgentAdmin = {
     this.shadowRoot.addEventListener('change', (event) => this.handleChange(event));
   },
 
-  async request(path, options = {}) {
-    const response = await fetch(`${trimSlash(this.backendUrl)}${path}`, {
-      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-      ...options,
+  // Authentication methods
+  checkAuth() {
+    const token = globalObject.localStorage?.getItem('admin_access_token');
+    const refreshToken = globalObject.localStorage?.getItem('admin_refresh_token');
+    if (token) {
+      this.accessToken = token;
+      this.refreshToken = refreshToken || null;
+      return true;
+    }
+    if (refreshToken) {
+      this.refreshToken = refreshToken;
+      return true;
+    }
+    return false;
+  },
+
+  async login(username, password) {
+    try {
+      const data = await this.request('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ username, password }),
+        skipAuth: true,
+        skipAutoLogout: true,
+      });
+      this.accessToken = data.access_token;
+      this.refreshToken = data.refresh_token || null;
+      globalObject.localStorage?.setItem('admin_access_token', data.access_token);
+      if (data.refresh_token) {
+        globalObject.localStorage?.setItem('admin_refresh_token', data.refresh_token);
+      }
+      this.requiresPasswordSetup = false;
+      this.activeView = 'models';
+      this.refresh().catch(() => {
+        this.render();
+      });
+      this.startAutoProbe();
+      return data;
+    } catch (error) {
+      if (error?.message === 'Default admin password must be changed before admin login') {
+        this.requiresPasswordSetup = true;
+        this.activeView = 'setup-password';
+        this.render();
+        this.toast('首次启动请先设置管理员密码');
+        throw error;
+      }
+      this.toast(`登录失败：${error.message}`);
+      throw error;
+    }
+  },
+
+  logout() {
+    this.accessToken = null;
+    this.refreshToken = null;
+    globalObject.localStorage?.removeItem('admin_access_token');
+    globalObject.localStorage?.removeItem('admin_refresh_token');
+    this.stopAutoProbe();
+    this.activeView = 'login';
+    this.render();
+    this.loadBootstrapStatus().catch(() => {});
+  },
+
+  async refreshAccessToken() {
+    if (!this.refreshToken) return false;
+
+    try {
+      const response = await fetch(`${trimSlash(this.backendUrl)}/auth/refresh`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ refresh_token: this.refreshToken }),
+      });
+
+      if (!response.ok) {
+        return false;
+      }
+
+      const data = await response.json();
+      if (!data?.access_token) {
+        return false;
+      }
+
+      this.accessToken = data.access_token;
+      globalObject.localStorage?.setItem('admin_access_token', data.access_token);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  async loadBootstrapStatus() {
+    this.authBootstrapLoading = true;
+    this.render();
+    try {
+      const data = await this.request('/auth/bootstrap-status', {
+        method: 'GET',
+        skipAuth: true,
+        skipAutoLogout: true,
+      });
+      this.requiresPasswordSetup = data?.requires_password_setup === true;
+      this.bootstrapUsername = String(data?.username || 'admin').trim() || 'admin';
+      if (!this.accessToken) {
+        this.activeView = this.requiresPasswordSetup ? 'setup-password' : 'login';
+      }
+      return data;
+    } catch (error) {
+      this.requiresPasswordSetup = false;
+      this.bootstrapUsername = 'admin';
+      throw error;
+    } finally {
+      this.authBootstrapLoading = false;
+      this.render();
+    }
+  },
+
+  async bootstrapAdminPassword(username, newPassword, confirmPassword) {
+    const payload = await this.request('/auth/bootstrap-admin-password', {
+      method: 'POST',
+      body: JSON.stringify({
+        username,
+        new_password: newPassword,
+        confirm_password: confirmPassword,
+      }),
+      skipAuth: true,
+      skipAutoLogout: true,
     });
+    this.requiresPasswordSetup = false;
+    this.bootstrapUsername = String(payload?.username || username || 'admin').trim() || 'admin';
+    this.activeView = 'login';
+    this.render();
+    return payload;
+  },
+
+  async request(path, options = {}) {
+    const {
+      skipAuth = false,
+      skipAutoLogout = false,
+      headers: optionHeaders = {},
+      ...fetchOptions
+    } = options;
+    const headers = {
+      'Content-Type': 'application/json',
+      ...optionHeaders
+    };
+
+    if (!skipAuth && this.accessToken) {
+      headers.Authorization = `Bearer ${this.accessToken}`;
+    }
+
+    const url = `${trimSlash(this.backendUrl)}${path}`;
+    let response = await fetch(url, {
+      headers,
+      ...fetchOptions,
+    });
+
+    const canRefresh = !skipAuth && path !== '/auth/login' && path !== '/auth/refresh';
+    if (response.status === 401 && canRefresh) {
+      const refreshed = await this.refreshAccessToken();
+      if (refreshed && this.accessToken) {
+        headers.Authorization = `Bearer ${this.accessToken}`;
+        response = await fetch(url, {
+          headers,
+          ...fetchOptions,
+        });
+      }
+    }
+
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+      let message = `HTTP ${response.status}`;
+      try {
+        const payload = await response.json();
+        message = payload?.detail || payload?.error || payload?.message || message;
+      } catch {}
+      if (!skipAutoLogout && (response.status === 401 || response.status === 403)) {
+        this.logout();
+        throw new Error(response.status === 401 ? '登录已过期' : message || '当前账号已无权限访问管理后台');
+      }
+      throw new Error(message);
     }
     return response.json();
   },
@@ -211,6 +448,151 @@ export const AIAgentAdmin = {
     if (options.probeAfterSave) {
       await this.probeAll({ persist: true });
       if (!options.silent) this.toast('可用性检测完成');
+    }
+  },
+
+  // API Key management methods
+  async loadAPIKeys() {
+    this.setBusy(true);
+    try {
+      const payload = await this.request('/admin/api-keys');
+      this.apiKeys = normalizeApiKeysPayload(payload);
+    } catch (error) {
+      this.toast(`加载 API Keys 失败：${error.message}`);
+      this.apiKeys = [];
+    } finally {
+      this.setBusy(false);
+      this.render();
+    }
+  },
+
+  async createAPIKey(data) {
+    this.setBusy(true);
+    try {
+      await this.request('/admin/api-keys', {
+        method: 'POST',
+        body: JSON.stringify(data)
+      });
+      await this.loadAPIKeys();
+      this.toast('API Key 已创建');
+    } catch (error) {
+      this.toast(`创建 API Key 失败：${error.message}`);
+    } finally {
+      this.setBusy(false);
+    }
+  },
+
+  async updateAPIKey(apiKey, data) {
+    this.setBusy(true);
+    try {
+      await this.request(`/admin/api-keys/${apiKey}`, {
+        method: 'PUT',
+        body: JSON.stringify(data)
+      });
+      await this.loadAPIKeys();
+      this.toast('API Key 已更新');
+    } catch (error) {
+      this.toast(`更新 API Key 失败：${error.message}`);
+    } finally {
+      this.setBusy(false);
+    }
+  },
+
+  async deleteAPIKey(apiKey) {
+    this.setBusy(true);
+    try {
+      await this.request(`/admin/api-keys/${apiKey}`, {
+        method: 'DELETE'
+      });
+      await this.loadAPIKeys();
+      this.toast('API Key 已删除');
+    } catch (error) {
+      this.toast(`删除 API Key 失败：${error.message}`);
+    } finally {
+      this.setBusy(false);
+    }
+  },
+
+  async copyAPIKey(apiKey) {
+    const value = String(apiKey || '').trim();
+    if (!value) {
+      this.toast('API Key 不存在');
+      return;
+    }
+    try {
+      if (globalObject.navigator?.clipboard?.writeText) {
+        await globalObject.navigator.clipboard.writeText(value);
+      } else if (typeof document !== 'undefined') {
+        const textarea = document.createElement('textarea');
+        textarea.value = value;
+        textarea.setAttribute('readonly', 'readonly');
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        textarea.remove();
+      } else {
+        throw new Error('当前环境不支持复制');
+      }
+      this.toast('API Key 已复制');
+    } catch (error) {
+      this.toast(`复制失败：${error.message || '未知错误'}`);
+    }
+  },
+
+  async toggleAPIKeyEnabled(apiKey) {
+    const item = this.apiKeys.find((key) => getApiKeyIdentifier(key) === apiKey);
+    if (!item) {
+      this.toast('未找到 API Key');
+      return;
+    }
+    await this.updateAPIKey(apiKey, {
+      enabled: item.enabled === false,
+    });
+  },
+
+  // Stats and logs methods
+  async loadStats() {
+    this.setBusy(true);
+    try {
+      const payload = await this.request('/admin/stats');
+      this.stats = normalizeStatsPayload(payload);
+    } catch (error) {
+      this.toast(`加载统计数据失败：${error.message}`);
+      this.stats = null;
+    } finally {
+      this.setBusy(false);
+      this.render();
+    }
+  },
+
+  async loadLogs(logType = 'request', limit = 100) {
+    this.setBusy(true);
+    try {
+      const data = await this.request(`/admin/logs?log_type=${logType}&limit=${limit}`);
+      this.logs = data.logs || [];
+    } catch (error) {
+      this.toast(`加载日志失败：${error.message}`);
+      this.logs = [];
+    } finally {
+      this.setBusy(false);
+      this.render();
+    }
+  },
+
+  async unblockIP(ip) {
+    this.setBusy(true);
+    try {
+      await this.request(`/admin/unblock-ip?ip=${ip}`, {
+        method: 'POST'
+      });
+      await this.loadStats();
+      this.toast(`IP ${ip} 已解封`);
+    } catch (error) {
+      this.toast(`解封 IP 失败：${error.message}`);
+    } finally {
+      this.setBusy(false);
     }
   },
 
@@ -313,8 +695,14 @@ export const AIAgentAdmin = {
     if (action === 'close') this.close();
     if (action === 'view') {
       this.activeView = id;
+      if (id === 'api-keys') this.loadAPIKeys();
+      if (id === 'stats') this.loadStats();
+      if (id === 'logs') this.loadLogs();
       this.render();
     }
+    if (action === 'login') this.handleLogin();
+    if (action === 'bootstrap-password') this.handleBootstrapPassword();
+    if (action === 'logout') this.logout();
     if (action === 'save') this.save({ probeAfterSave: true });
     if (action === 'refresh') this.refresh();
     if (action === 'toggle-mcp') this.toggleMcp(id);
@@ -335,6 +723,17 @@ export const AIAgentAdmin = {
       this.state.loadBalancing.enabled = !this.state.loadBalancing.enabled;
       this.render();
     }
+    if (action === 'add-api-key') this.addAPIKey();
+    if (action === 'copy-api-key') this.copyAPIKey(id);
+    if (action === 'toggle-api-key') this.toggleAPIKeyEnabled(id);
+    if (action === 'edit-api-key') this.editAPIKey(id);
+    if (action === 'save-api-key') this.saveAPIKey();
+    if (action === 'cancel-api-key') this.closeAPIKey();
+    if (action === 'delete-api-key') this.confirmDeleteAPIKey(id);
+    if (action === 'refresh-api-keys') this.loadAPIKeys();
+    if (action === 'unblock-ip') this.unblockIP(id);
+    if (action === 'refresh-stats') this.loadStats();
+    if (action === 'refresh-logs') this.loadLogs();
   },
 
   handleInput(event) {
@@ -347,6 +746,16 @@ export const AIAgentAdmin = {
     }
     const bind = target.getAttribute('data-bind');
     if (!bind) return;
+
+    // Handle API Key form bindings
+    if (bind.startsWith('apiKeyForm.')) {
+      const key = bind.split('.')[1];
+      if (this.apiKeyFormEditor) {
+        this.apiKeyFormEditor[key] = target.type === 'number' ? Number(target.value) : target.value;
+      }
+      return;
+    }
+
     this.updateBinding(bind, target.type === 'number' ? Number(target.value) : target.value);
   },
 
@@ -648,6 +1057,123 @@ export const AIAgentAdmin = {
     this.render();
   },
 
+  // API Key form handlers
+  addAPIKey() {
+    this.apiKeyFormEditor = {
+      originalKey: '',
+      name: '',
+      expiresInDays: 30,
+      rateLimit: 100,
+      enabled: true
+    };
+    this.render();
+  },
+
+  editAPIKey(apiKey) {
+    const key = this.apiKeys.find((item) => getApiKeyIdentifier(item) === apiKey);
+    if (!key) return;
+    this.apiKeyFormEditor = {
+      originalKey: getApiKeyIdentifier(key),
+      name: key.name || '',
+      expiresInDays: 30,
+      rateLimit: key.rate_limit || 100,
+      enabled: key.enabled !== false
+    };
+    this.render();
+  },
+
+  async saveAPIKey() {
+    if (!this.apiKeyFormEditor) return;
+
+    const name = String(this.apiKeyFormEditor.name || '').trim();
+    if (!name) {
+      this.toast('名称不能为空');
+      return;
+    }
+
+    const data = {
+      name,
+      expires_days: Number(this.apiKeyFormEditor.expiresInDays || 30),
+      rate_limit: Number(this.apiKeyFormEditor.rateLimit || 100),
+    };
+
+    const originalKey = this.apiKeyFormEditor.originalKey;
+    if (originalKey) {
+      data.enabled = this.apiKeyFormEditor.enabled !== false;
+      await this.updateAPIKey(originalKey, data);
+    } else {
+      await this.createAPIKey(data);
+    }
+    this.apiKeyFormEditor = null;
+    this.render();
+  },
+
+  closeAPIKey() {
+    this.apiKeyFormEditor = null;
+    this.render();
+  },
+
+  confirmDeleteAPIKey(apiKey) {
+    const item = this.apiKeys.find((key) => getApiKeyIdentifier(key) === apiKey);
+    const name = item?.name ? `「${item.name}」` : '该 API Key';
+    if (typeof globalObject.confirm === 'function' && !globalObject.confirm(`确认删除${name}吗？`)) {
+      return;
+    }
+    this.deleteAPIKey(apiKey);
+  },
+
+  handleLogin() {
+    const root = this.shadowRoot?.querySelector('.admin-root');
+    if (!root) return;
+    const usernameInput = root.querySelector('[data-role="login-username"]');
+    const passwordInput = root.querySelector('[data-role="login-password"]');
+    if (!usernameInput || !passwordInput) return;
+
+    const username = usernameInput.value.trim();
+    const password = passwordInput.value.trim();
+
+    if (!username || !password) {
+      this.toast('请输入用户名和密码');
+      return;
+    }
+
+    this.login(username, password).catch(() => {});
+  },
+
+  handleBootstrapPassword() {
+    const root = this.shadowRoot?.querySelector('.admin-root');
+    if (!root) return;
+    const usernameInput = root.querySelector('[data-role="setup-username"]');
+    const passwordInput = root.querySelector('[data-role="setup-password"]');
+    const confirmInput = root.querySelector('[data-role="setup-confirm-password"]');
+    if (!usernameInput || !passwordInput || !confirmInput) return;
+
+    const username = usernameInput.value.trim() || this.bootstrapUsername || 'admin';
+    const password = passwordInput.value.trim();
+    const confirmPassword = confirmInput.value.trim();
+
+    if (!password || !confirmPassword) {
+      this.toast('请输入新密码并确认');
+      return;
+    }
+    if (password.length < 8) {
+      this.toast('新密码至少需要 8 位');
+      return;
+    }
+    if (password !== confirmPassword) {
+      this.toast('两次输入的密码不一致');
+      return;
+    }
+
+    this.bootstrapAdminPassword(username, password, confirmPassword)
+      .then(() => {
+        this.toast('管理员密码已设置，请使用新密码登录');
+      })
+      .catch((error) => {
+        this.toast(`设置管理员密码失败：${error.message}`);
+      });
+  },
+
   styles() {
     return `
       :host { all: initial; }
@@ -922,6 +1448,121 @@ export const AIAgentAdmin = {
         background: #242424;
         font-size: 12px;
       }
+      .api-key-table-wrap {
+        overflow: auto;
+        border: 1px solid #252525;
+        border-radius: 8px;
+        background: #1a1a1a;
+      }
+      .api-key-table {
+        width: 100%;
+        min-width: 980px;
+        border-collapse: collapse;
+      }
+      .api-key-table th,
+      .api-key-table td {
+        padding: 14px 16px;
+        border-bottom: 1px solid #262626;
+        text-align: left;
+        vertical-align: middle;
+        font-size: 12px;
+      }
+      .api-key-table th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        color: #8e8e8e;
+        background: #202020;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .api-key-table tbody tr:hover {
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .api-key-name {
+        color: #e8e8e8;
+        font-size: 13px;
+        font-weight: 650;
+      }
+      .api-key-subtext {
+        margin-top: 4px;
+        color: #7e7e7e;
+        font-size: 11px;
+      }
+      .api-key-secret {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+      .api-key-code {
+        display: inline-flex;
+        align-items: center;
+        max-width: 180px;
+        padding: 4px 8px;
+        border: 1px solid rgba(71, 180, 133, 0.2);
+        border-radius: 999px;
+        color: #4dd6a0;
+        background: rgba(31, 120, 83, 0.16);
+        font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+        font-size: 11px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .api-key-copy-btn {
+        min-width: auto;
+        padding: 0;
+        border: 0;
+        color: #a7b7d0;
+        background: transparent;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .api-key-copy-btn:hover {
+        color: #f0f6ff;
+      }
+      .status-badge {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 56px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 650;
+      }
+      .status-badge.ok {
+        color: #43b877;
+        background: rgba(67, 184, 119, 0.14);
+      }
+      .status-badge.off {
+        color: #9ea6b2;
+        background: rgba(158, 166, 178, 0.14);
+      }
+      .api-key-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        white-space: nowrap;
+      }
+      .api-key-action {
+        padding: 0;
+        border: 0;
+        color: #9ea8b8;
+        background: transparent;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .api-key-action:hover {
+        color: #f5f7fb;
+      }
+      .api-key-action.warn:hover {
+        color: #f0c15d;
+      }
+      .api-key-action.danger:hover {
+        color: #ef7d7d;
+      }
       .pill {
         display: inline-flex;
         align-items: center;
@@ -941,6 +1582,119 @@ export const AIAgentAdmin = {
         background: #252525;
         box-shadow: 0 16px 42px rgba(0, 0, 0, 0.36);
         font-size: 12px;
+      }
+      .login-container {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background: #151515;
+      }
+      .login-box {
+        width: min(400px, calc(100vw - 48px));
+        padding: 32px;
+        border: 1px solid #252525;
+        border-radius: 8px;
+        background: #1e1e1e;
+        text-align: center;
+      }
+      .login-box h1 {
+        margin-bottom: 8px;
+      }
+      .login-form {
+        margin-top: 24px;
+        text-align: left;
+      }
+      .login-form .field + .field {
+        margin-top: 12px;
+      }
+      .login-form .btn {
+        margin-top: 20px;
+      }
+      .full-width {
+        width: 100%;
+      }
+      .empty-state {
+        padding: 60px 20px;
+        text-align: center;
+        color: #888;
+      }
+      .empty-state p {
+        margin-bottom: 16px;
+      }
+      .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 16px;
+        margin-bottom: 24px;
+      }
+      .stat-card {
+        padding: 20px;
+        border: 1px solid #252525;
+        border-radius: 8px;
+        background: #1e1e1e;
+      }
+      .stat-label {
+        color: #8e8e8e;
+        font-size: 12px;
+        margin-bottom: 8px;
+      }
+      .stat-value {
+        color: #e8e8e8;
+        font-size: 28px;
+        font-weight: 650;
+      }
+      .logs-container {
+        max-height: 600px;
+        overflow-y: auto;
+      }
+      .log-entry {
+        padding: 12px;
+        border-bottom: 1px solid #2a2a2a;
+        font-size: 12px;
+      }
+      .log-entry:last-child {
+        border-bottom: 0;
+      }
+      .log-time {
+        color: #858585;
+        margin-bottom: 4px;
+      }
+      .log-content {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .log-ip {
+        color: #6ca4d9;
+      }
+      .log-method {
+        color: #d8d8d8;
+        font-weight: 600;
+      }
+      .log-path {
+        color: #d8d8d8;
+      }
+      .log-status {
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-weight: 600;
+      }
+      .log-status.status-2 {
+        color: #43b877;
+        background: rgba(67, 184, 119, 0.15);
+      }
+      .log-status.status-4 {
+        color: #d4aa33;
+        background: rgba(212, 170, 51, 0.15);
+      }
+      .log-status.status-5 {
+        color: #e06464;
+        background: rgba(224, 100, 100, 0.15);
+      }
+      .log-key {
+        color: #98a6bd;
+        font-family: monospace;
       }
       .json-dialog-backdrop {
         position: fixed;
@@ -1026,6 +1780,9 @@ export const AIAgentAdmin = {
         .json-editor {
           min-height: 320px;
         }
+        .api-key-table {
+          min-width: 860px;
+        }
       }
     `;
   },
@@ -1033,16 +1790,48 @@ export const AIAgentAdmin = {
   render() {
     const root = this.shadowRoot?.querySelector('.admin-root');
     if (!root) return;
+
+    // If not logged in, show login view
+    if (!this.accessToken || this.activeView === 'login') {
+      root.innerHTML = this.requiresPasswordSetup || this.activeView === 'setup-password'
+        ? this.renderSetupPasswordView()
+        : this.renderLoginView();
+      return;
+    }
+
+    // Logged in, show admin interface
+    let contentHTML = '';
+    switch (this.activeView) {
+      case 'models':
+        contentHTML = this.renderModels();
+        break;
+      case 'mcp':
+        contentHTML = this.renderMcp();
+        break;
+      case 'api-keys':
+        contentHTML = this.renderAPIKeysView();
+        break;
+      case 'stats':
+        contentHTML = this.renderStatsView();
+        break;
+      case 'logs':
+        contentHTML = this.renderLogsView();
+        break;
+      default:
+        contentHTML = this.renderModels();
+    }
+
     root.innerHTML = `
       <div class="admin-shell">
         ${this.renderSidebar()}
         <main class="content">
           ${this.renderTopbar()}
-          ${this.activeView === 'models' ? this.renderModels() : this.renderMcp()}
+          ${contentHTML}
         </main>
       </div>
       ${this.renderMcpFormEditor()}
       ${this.renderModelFormEditor()}
+      ${this.renderAPIKeyFormEditor()}
     `;
   },
 
@@ -1050,11 +1839,14 @@ export const AIAgentAdmin = {
     const items = [
       ['models', '#', 'Models'],
       ['mcp', '&', 'Tools & MCP'],
+      ['api-keys', 'K', 'API Keys'],
+      ['stats', 'S', 'Stats'],
+      ['logs', 'L', 'Logs'],
     ];
     return `
       <aside class="sidebar">
-        <div class="sidebar-title">Agent Settings</div>
         <div class="nav-section">
+          <h2 class="sidebar-title">Agent Settings</h2>
           ${items
             .map(
               ([id, icon, label]) => `
@@ -1066,25 +1858,60 @@ export const AIAgentAdmin = {
             )
             .join('')}
         </div>
+        <div class="nav-section">
+          <button class="nav-item" data-action="logout">
+            <span class="nav-icon">↪</span>
+            <span>Logout</span>
+          </button>
+        </div>
       </aside>
     `;
   },
 
   renderTopbar() {
-    const title = this.activeView === 'models' ? 'Models' : 'Tools';
-    const subtitle =
-      this.activeView === 'models'
-        ? '配置多模型池，检测可用性，并在模型不可用时跳过到其他可用模型。'
-        : '配置 MCP Server，查看工具、资源、Prompt 与运行状态。';
+    const viewConfig = {
+      models: {
+        title: 'Models',
+        subtitle: '配置多模型池，检测可用性，并在模型不可用时跳过到其他可用模型。',
+        showSave: true
+      },
+      mcp: {
+        title: 'Tools',
+        subtitle: '配置 MCP Server，查看工具、资源、Prompt 与运行状态。',
+        showSave: true
+      },
+      'api-keys': {
+        title: 'API Keys',
+        subtitle: '管理 API Keys，设置有效期和速率限制。',
+        showSave: false
+      },
+      stats: {
+        title: '统计数据',
+        subtitle: '查看请求统计、成功率和被封禁 IP。',
+        showSave: false
+      },
+      logs: {
+        title: '日志查看',
+        subtitle: '查看请求日志和安全事件日志。',
+        showSave: false
+      }
+    };
+
+    const config = viewConfig[this.activeView] || viewConfig.models;
+
     return `
       <div class="topbar">
         <div>
-          <h1>${title}</h1>
-          <p class="subtitle">${subtitle}</p>
+          <h1>${config.title}</h1>
+          <p class="subtitle">${config.subtitle}</p>
         </div>
         <div class="actions">
-          <button class="btn" data-action="refresh" type="button">刷新</button>
-          <button class="btn primary" data-action="save" type="button">保存</button>
+          ${config.showSave ? `
+            <button class="btn" data-action="refresh" type="button">刷新</button>
+            <button class="btn primary" data-action="save" type="button">保存</button>
+          ` : `
+            <button class="btn" data-action="refresh-${this.activeView}" type="button">刷新</button>
+          `}
         </div>
       </div>
     `;
@@ -1257,6 +2084,240 @@ export const AIAgentAdmin = {
             <button class="btn primary" data-action="save-model" type="button">保存并检测</button>
           </div>
         </section>
+      </div>
+    `;
+  },
+
+  renderLoginView() {
+    return `
+      <div class="login-container">
+        <div class="login-box">
+          <h1>AI Agent 管理后台</h1>
+          <p class="subtitle">${this.authBootstrapLoading ? '正在检查管理员初始化状态...' : '请登录以继续'}</p>
+          <div class="login-form">
+            <div class="field">
+              <label>用户名</label>
+              <input type="text" data-role="login-username" value="${escapeHTML(this.bootstrapUsername || 'admin')}" placeholder="请输入用户名" />
+            </div>
+            <div class="field">
+              <label>密码</label>
+              <input type="password" data-role="login-password" placeholder="请输入密码" />
+            </div>
+            <button class="btn primary full-width" data-action="login" type="button">登录</button>
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  renderSetupPasswordView() {
+    return `
+      <div class="login-container">
+        <div class="login-box">
+          <h1>初始化管理员账号</h1>
+          <p class="subtitle">首次启动需要先修改默认管理员口令，然后才能进入 /admin。</p>
+          <div class="login-form">
+            <div class="field">
+              <label>用户名</label>
+              <input type="text" data-role="setup-username" value="${escapeHTML(this.bootstrapUsername || 'admin')}" />
+            </div>
+            <div class="field">
+              <label>新密码</label>
+              <input type="password" data-role="setup-password" placeholder="至少 8 位" />
+            </div>
+            <div class="field">
+              <label>确认密码</label>
+              <input type="password" data-role="setup-confirm-password" placeholder="请再次输入新密码" />
+            </div>
+            <button class="btn primary full-width" data-action="bootstrap-password" type="button">保存并返回登录</button>
+          </div>
+        </div>
+      </div>
+    `;
+  },
+
+  renderAPIKeysView() {
+    if (!this.apiKeys.length) {
+      return `
+        <div class="empty-state">
+          <p>暂无 API Keys</p>
+          <button class="btn primary" data-action="add-api-key" type="button">创建 API Key</button>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="model-toolbar">
+        <button class="btn primary" data-action="add-api-key" type="button">创建 API Key</button>
+      </div>
+      <section class="api-key-table-wrap">
+        <table class="api-key-table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>API 密钥</th>
+              <th>用量</th>
+              <th>速率限制</th>
+              <th>过期时间</th>
+              <th>状态</th>
+              <th>上次使用时间</th>
+              <th>创建时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${this.apiKeys.map((key) => this.renderAPIKey(key)).join('')}
+          </tbody>
+        </table>
+      </section>
+    `;
+  },
+
+  renderAPIKey(key) {
+    const keyId = getApiKeyIdentifier(key);
+    const keyText = key.api_key || maskApiKey(keyId);
+    const description = String(key.description || '').trim();
+    const enabled = key.enabled !== false;
+    const usageCount = key.usage_count || key.total_requests || 0;
+    const toggleLabel = enabled ? '禁用' : '启用';
+    return `
+      <tr>
+        <td>
+          <div class="api-key-name">${escapeHTML(key.name || '--')}</div>
+          ${description ? `<div class="api-key-subtext">${escapeHTML(description)}</div>` : ''}
+        </td>
+        <td>
+          <div class="api-key-secret">
+            <span class="api-key-code" title="${escapeHTML(keyText)}">${escapeHTML(keyText)}</span>
+            <button class="api-key-copy-btn" data-action="copy-api-key" data-id="${escapeHTML(keyId)}" type="button">复制</button>
+          </div>
+        </td>
+        <td>${usageCount} 次</td>
+        <td>${key.rate_limit || 100}/分钟</td>
+        <td>${escapeHTML(formatDateTime(key.expires_at, '永不过期'))}</td>
+        <td><span class="status-badge ${enabled ? 'ok' : 'off'}">${enabled ? '活跃' : '已禁用'}</span></td>
+        <td>${escapeHTML(formatDateTime(key.last_used_at))}</td>
+        <td>${escapeHTML(formatDateTime(key.created_at))}</td>
+        <td>
+          <div class="api-key-actions">
+            <button class="api-key-action" data-action="copy-api-key" data-id="${escapeHTML(keyId)}" type="button">复制</button>
+            <button class="api-key-action warn" data-action="toggle-api-key" data-id="${escapeHTML(keyId)}" type="button">${toggleLabel}</button>
+            <button class="api-key-action" data-action="edit-api-key" data-id="${escapeHTML(keyId)}" type="button">编辑</button>
+            <button class="api-key-action danger" data-action="delete-api-key" data-id="${escapeHTML(keyId)}" type="button">删除</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  },
+
+  renderAPIKeyFormEditor() {
+    if (!this.apiKeyFormEditor) return '';
+    const title = this.apiKeyFormEditor.originalKey ? 'Edit API Key' : 'New API Key';
+    return `
+      <div class="json-dialog-backdrop">
+        <section class="json-dialog" role="dialog" aria-modal="true" aria-label="${escapeHTML(title)}">
+          <div class="json-dialog-header">
+            <div>
+              <div class="json-dialog-title">${escapeHTML(title)}</div>
+              <div class="row-desc">配置 API Key 的名称、有效期和速率限制。</div>
+            </div>
+            <button class="btn" data-action="cancel-api-key" type="button">取消</button>
+          </div>
+          <div class="form-editor">
+            <div class="form-grid">
+              <div class="field full">
+                <label>名称 *</label>
+                <input type="text" data-bind="apiKeyForm.name" value="${escapeHTML(this.apiKeyFormEditor.name)}" placeholder="API Key 名称" />
+              </div>
+              <div class="field">
+                <label>有效期（天）</label>
+                <input type="number" data-bind="apiKeyForm.expiresInDays" value="${this.apiKeyFormEditor.expiresInDays}" min="1" max="365" />
+              </div>
+              <div class="field">
+                <label>速率限制（次/分钟）</label>
+                <input type="number" data-bind="apiKeyForm.rateLimit" value="${this.apiKeyFormEditor.rateLimit}" min="1" max="1000" />
+              </div>
+            </div>
+          </div>
+          <div class="json-dialog-footer">
+            <button class="btn" data-action="cancel-api-key" type="button">取消</button>
+            <button class="btn primary" data-action="save-api-key" type="button">保存</button>
+          </div>
+        </section>
+      </div>
+    `;
+  },
+
+  renderStatsView() {
+    if (!this.stats) {
+      return `<div class="empty-state"><p>加载中...</p></div>`;
+    }
+
+    const blockedIPs = this.stats.blocked_ips || [];
+    return `
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-label">今日请求</div>
+          <div class="stat-value">${this.stats.today_requests || 0}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">成功请求</div>
+          <div class="stat-value">${this.stats.today_success || 0}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">失败请求</div>
+          <div class="stat-value">${this.stats.today_failed || 0}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">被封禁 IP</div>
+          <div class="stat-value">${blockedIPs.length}</div>
+        </div>
+      </div>
+      ${blockedIPs.length > 0 ? `
+        <div class="section-label">被封禁 IP</div>
+        <section class="settings-card">
+          ${blockedIPs.map((ip) => `
+            <div class="model-row">
+              <span class="dot bad"></span>
+              <div>
+                <div class="row-title">${escapeHTML(ip)}</div>
+              </div>
+              <div class="inline-actions">
+                <button class="link-btn" data-action="unblock-ip" data-id="${escapeHTML(ip)}" type="button">解封</button>
+              </div>
+            </div>
+          `).join('')}
+        </section>
+      ` : ''}
+    `;
+  },
+
+  renderLogsView() {
+    if (!this.logs.length) {
+      return `<div class="empty-state"><p>暂无日志</p></div>`;
+    }
+
+    return `
+      <section class="settings-card">
+        <div class="logs-container">
+          ${this.logs.map((log) => this.renderLogEntry(log)).join('')}
+        </div>
+      </section>
+    `;
+  },
+
+  renderLogEntry(log) {
+    const timestamp = log.timestamp ? new Date(log.timestamp).toLocaleString('zh-CN') : '';
+    return `
+      <div class="log-entry">
+        <div class="log-time">${escapeHTML(timestamp)}</div>
+        <div class="log-content">
+          <span class="log-ip">${escapeHTML(log.ip || '')}</span>
+          <span class="log-method">${escapeHTML(log.method || '')}</span>
+          <span class="log-path">${escapeHTML(log.path || '')}</span>
+          <span class="log-status status-${Math.floor((log.status || 0) / 100)}">${log.status || ''}</span>
+          ${log.api_key ? `<span class="log-key">${escapeHTML(log.api_key)}</span>` : ''}
+        </div>
       </div>
     `;
   },
