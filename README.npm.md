@@ -5,6 +5,8 @@
 - 前端 Widget：页面问答、受控导航、当前页操作
 - `webGenerate` CLI：把知识文档工作流安装到 Codex、Claude、Cursor、Gemini 等助手里
 
+在线文档与演示：<https://hyb654197815.github.io/web-ai/>
+
 如果你需要完整的后端接入、鉴权方案和项目架构，请看 GitHub 仓库主页。
 
 ## 安装

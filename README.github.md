@@ -4,6 +4,8 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-43853d)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
+在线文档与演示：<https://hyb654197815.github.io/web-ai/>
+
 一个面向后台、中台、运营系统的页面级 AI Agent 方案。
 
 它把这件事拆成三层：
