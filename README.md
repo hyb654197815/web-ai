@@ -126,6 +126,8 @@ ADMIN_PASSWORD=your-strong-password
 JWT_SECRET_KEY=your-long-random-secret
 ACCESS_TOKEN_EXPIRE_MINUTES=15
 ENABLE_ADMIN_BACKEND=true
+# 默认使用 SQLite：data/agent.sqlite3；可选配置 MySQL/PostgreSQL
+# AGENT_DATABASE_URL=postgresql+psycopg://user:password@127.0.0.1:5432/web_ai
 ```
 
 然后启动服务：
@@ -152,11 +154,14 @@ python main.py
 2. 创建一个新的 Key
 3. 保存生成结果
 4. 根据需要在 `Models`、`Tools & MCP` 中配置模型和工具
+5. 如需 token 计费，在模型里填写 `input_price`、`output_price`、`cache_write_price`、`cache_read_price`
+6. 打开 `Usage` 查看请求数、token、消费、平均耗时和调用明细
 
 说明：
 
 - 如果没有配置可用模型，Agent 无法正常回答
 - 如果业务依赖 MCP 工具，也应该在这一步一起配置
+- 价格单位是 USD / 1M tokens；数据库 DSL 见 `backend/SQL_DSL.md`
 
 ### 6. 安装前端包
 

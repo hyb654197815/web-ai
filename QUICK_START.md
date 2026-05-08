@@ -63,6 +63,8 @@ ADMIN_PASSWORD=your-strong-password
 JWT_SECRET_KEY=your-random-secret
 ACCESS_TOKEN_EXPIRE_MINUTES=15
 ENABLE_ADMIN_BACKEND=true
+# 默认使用 SQLite：data/agent.sqlite3
+# AGENT_DATABASE_URL=mysql+pymysql://user:password@127.0.0.1:3306/web_ai?charset=utf8mb4
 ```
 
 说明：
@@ -88,12 +90,15 @@ python main.py
 3. 创建新的 API Key
 4. 保存生成的 Key
 5. 在 `Models` 中配置可用模型
-6. 如果需要，在 `Tools & MCP` 中配置工具和 MCP
+6. 如果需要计费，在模型里填写输入、输出、缓存写入、缓存读取价格
+7. 如果需要，在 `Tools & MCP` 中配置工具和 MCP
+8. 打开 `Usage` 查看 token 用量、费用、平均耗时和调用明细
 
 说明：
 
 - 没有可用模型时，Agent 无法正常返回高质量回答
 - 如果复制回来的 `webAIDocs/` 不完整，回答质量也会明显下降
+- 价格单位是 USD / 1M tokens；MySQL、PostgreSQL 或其他 SQLAlchemy 方言可通过驱动 URL 配置
 
 ## 8. 选择前端接入方式
 

@@ -1,8 +1,0 @@
-{
-  "loadBalancing": {
-    "enabled": true,
-    "strategy": "round_robin"
-  },
-  "models": [
-  ]
-}

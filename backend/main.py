@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from agent_admin import load_admin_config, probe_model, public_admin_config, save_admin_config, select_model_config, update_model_status
 from agent_runtime import run_agent, stream_agent_events
+from billing import get_billing_usage, record_model_usage, usage_from_response_bytes
 from auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     bootstrap_admin_password,
@@ -38,6 +39,7 @@ from auth import (
     verify_token,
 )
 from config import CORS_ORIGINS, ENABLE_ADMIN_BACKEND, PORT, PROJECT_ROOT, REFERENCES_DIR
+from database import write_json_config
 from mcp_client import inspect_mcp_server, load_all_mcp_servers, mcp_server_from_payload
 from request_logger import abuse_detector, get_recent_logs, log_api_key_event, log_request, log_security_event, request_stats
 
@@ -302,6 +304,7 @@ def _normalize_anthropic_response(content: bytes) -> bytes:
     openai_payload = {
         "id": payload.get("id", "anthropic-message") if isinstance(payload, dict) else "anthropic-message",
         "object": "chat.completion",
+        "usage": payload.get("usage", {}) if isinstance(payload, dict) else {},
         "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
     }
     return json.dumps(openai_payload, ensure_ascii=False).encode("utf-8")
@@ -927,6 +930,19 @@ def get_stats(_: dict = Depends(verify_admin_token)):
     }
 
 
+@app.get("/api/admin/billing/usage")
+def get_billing_usage_endpoint(
+    range: str = Query("7d", description="统计范围，如 1d、7d、30d"),
+    api_key_id: str | None = Query(None, description="API Key 内部 ID"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    _: dict = Depends(verify_admin_token),
+):
+    """获取 token 计费统计与明细（需要管理员权限）"""
+    ensure_admin_backend_enabled()
+    return get_billing_usage(range, api_key_id=api_key_id, page=page, page_size=page_size)
+
+
 @app.post("/api/admin/unblock-ip")
 def unblock_ip(
     ip: str = Query(..., description="要解封的 IP"),
@@ -949,7 +965,11 @@ def agent_admin_page() -> FileResponse:
     ensure_admin_backend_enabled()
     if not ADMIN_HTML_PATH.exists():
         raise HTTPException(status_code=404, detail="Agent admin HTML is missing")
-    return FileResponse(ADMIN_HTML_PATH, media_type="text/html")
+    return FileResponse(
+        ADMIN_HTML_PATH,
+        media_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/admin/agent-admin.iife.js", response_class=FileResponse)
@@ -957,7 +977,11 @@ def agent_admin_script() -> FileResponse:
     ensure_admin_backend_enabled()
     if not ADMIN_SCRIPT_PATH.exists():
         raise HTTPException(status_code=404, detail="Run npm run build before opening Agent admin")
-    return FileResponse(ADMIN_SCRIPT_PATH, media_type="application/javascript")
+    return FileResponse(
+        ADMIN_SCRIPT_PATH,
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/page-agent/config")
@@ -1006,7 +1030,7 @@ def _save_mcp_servers_from_payload(payload: dict[str, Any]) -> None:
             )
         rendered[name] = rendered_server
 
-    (PROJECT_ROOT / "mcp.json").write_text(json.dumps({"mcpServers": rendered}, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_config("mcp_servers", {"mcpServers": rendered})
 
 
 @app.get("/api/admin/config")
@@ -1193,12 +1217,44 @@ def _encode_sse(event_name: str, payload: dict[str, Any]) -> str:
     return f"event: {event_name}\ndata: {data}\n\n"
 
 
-def _stream_chat_events(body: ChatRequest, pathname: str, session_id: str) -> Iterator[str]:
-    event_iter = stream_agent_events(body.message, pathname=pathname, session_id=session_id)
+def _empty_usage() -> dict[str, int]:
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_write_tokens": 0,
+        "cache_read_tokens": 0,
+        "total_tokens": 0,
+    }
+
+
+def _stream_chat_events(
+    body: ChatRequest,
+    pathname: str,
+    session_id: str,
+    *,
+    request: Request,
+    token_data: dict[str, Any],
+    model_config: dict[str, Any] | None,
+    usage_collector: dict[str, int],
+    started_at: float,
+    endpoint: str,
+) -> Iterator[str]:
+    status_code = 200
+    error_message = None
+    event_iter = stream_agent_events(
+        body.message,
+        pathname=pathname,
+        session_id=session_id,
+        model_config=model_config,
+        usage_collector=usage_collector,
+    )
 
     try:
         for event in event_iter:
             event_name = str(event.get("type") or "message")
+            if event_name == "error":
+                status_code = 500
+                error_message = str(event.get("message") or "")
             payload = {key: value for key, value in event.items() if key != "type"}
             payload["sessionId"] = session_id
 
@@ -1211,16 +1267,59 @@ def _stream_chat_events(body: ChatRequest, pathname: str, session_id: str) -> It
             event_iter.close()
         except Exception:
             pass
+        record_model_usage(
+            request=request,
+            token_data=token_data,
+            model_config=model_config,
+            endpoint=endpoint,
+            status_code=499,
+            usage=usage_collector,
+            started_at=started_at,
+            error="client disconnected",
+        )
         return
     except Exception as exc:
+        status_code = 500
+        error_message = f"stream failed: {exc}"
         yield _encode_sse("error", {"message": f"stream failed: {exc}", "sessionId": session_id})
 
     yield _encode_sse("done", {"ok": True, "sessionId": session_id})
+    record_model_usage(
+        request=request,
+        token_data=token_data,
+        model_config=model_config,
+        endpoint=endpoint,
+        status_code=status_code,
+        usage=usage_collector,
+        started_at=started_at,
+        error=error_message,
+    )
 
 
-def _build_streaming_response(body: ChatRequest, pathname: str, session_id: str) -> StreamingResponse:
+def _build_streaming_response(
+    body: ChatRequest,
+    pathname: str,
+    session_id: str,
+    *,
+    request: Request,
+    token_data: dict[str, Any],
+    endpoint: str,
+) -> StreamingResponse:
+    selected_model = select_model_config()
+    usage_collector = _empty_usage()
+    started_at = time.perf_counter()
     return StreamingResponse(
-        _stream_chat_events(body, pathname, session_id=session_id),
+        _stream_chat_events(
+            body,
+            pathname,
+            session_id=session_id,
+            request=request,
+            token_data=token_data,
+            model_config=selected_model,
+            usage_collector=usage_collector,
+            started_at=started_at,
+            endpoint=endpoint,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1232,6 +1331,7 @@ def _build_streaming_response(body: ChatRequest, pathname: str, session_id: str)
 
 @app.post("/api/chat", response_model=None)
 def chat(
+    request: Request,
     body: ChatRequest,
     stream: bool = Query(False, description="是否启用 SSE 流式输出"),
     token_data: dict = Depends(verify_access_token)
@@ -1241,11 +1341,49 @@ def chat(
     session_id = _resolve_or_create_session_id(body.sessionId)
 
     if stream:
-        return _build_streaming_response(body, pathname, session_id=session_id)
+        return _build_streaming_response(
+            body,
+            pathname,
+            session_id=session_id,
+            request=request,
+            token_data=token_data,
+            endpoint="/api/chat",
+        )
 
-    result = run_agent(body.message, pathname=pathname, session_id=session_id)
-    result["sessionId"] = session_id
-    return result
+    selected_model = select_model_config()
+    usage_collector = _empty_usage()
+    started_at = time.perf_counter()
+    try:
+        result = run_agent(
+            body.message,
+            pathname=pathname,
+            session_id=session_id,
+            model_config=selected_model,
+            usage_collector=usage_collector,
+        )
+        result["sessionId"] = session_id
+        record_model_usage(
+            request=request,
+            token_data=token_data,
+            model_config=selected_model,
+            endpoint="/api/chat",
+            status_code=200,
+            usage=usage_collector,
+            started_at=started_at,
+        )
+        return result
+    except Exception as exc:
+        record_model_usage(
+            request=request,
+            token_data=token_data,
+            model_config=selected_model,
+            endpoint="/api/chat",
+            status_code=500,
+            usage=usage_collector,
+            started_at=started_at,
+            error=str(exc),
+        )
+        raise
 
 
 @app.post("/api/page-agent/chat/completions", response_model=None)
@@ -1257,6 +1395,7 @@ async def page_agent_chat_completions(
     raw_body = await request.body()
     attempted: set[str] = set()
     last_error = ""
+    started_at = time.perf_counter()
 
     while True:
         selected_model = select_model_config(exclude_ids=attempted)
@@ -1290,12 +1429,31 @@ async def page_agent_chat_completions(
                 content = upstream_response.read()
                 content_type = upstream_response.headers.get("Content-Type", "application/json")
                 content = _normalize_anthropic_response(content) if provider == "Anthropic" else _normalize_page_agent_proxy_response(content, content_type)
+                record_model_usage(
+                    request=request,
+                    token_data=token_data,
+                    model_config=selected_model,
+                    endpoint="/api/page-agent/chat/completions",
+                    status_code=upstream_response.status,
+                    usage=usage_from_response_bytes(content),
+                    started_at=started_at,
+                )
                 return Response(content=content, status_code=upstream_response.status, media_type="application/json")
         except HTTPError as exc:
             content = exc.read()
             content_type = exc.headers.get("Content-Type", "application/json") if exc.headers else "application/json"
             content = _normalize_anthropic_response(content) if provider == "Anthropic" else _normalize_page_agent_proxy_response(content, content_type)
             if exc.code < 500 and exc.code not in {401, 403, 404, 408, 429}:
+                record_model_usage(
+                    request=request,
+                    token_data=token_data,
+                    model_config=selected_model,
+                    endpoint="/api/page-agent/chat/completions",
+                    status_code=exc.code,
+                    usage=usage_from_response_bytes(content),
+                    started_at=started_at,
+                    error=f"HTTP {exc.code}",
+                )
                 return Response(content=content, status_code=exc.code, media_type=content_type.split(";")[0])
             last_error = f"HTTP {exc.code}"
         except URLError as exc:
@@ -1313,18 +1471,36 @@ async def page_agent_chat_completions(
                 },
             )
 
+    record_model_usage(
+        request=request,
+        token_data=token_data,
+        model_config=None,
+        endpoint="/api/page-agent/chat/completions",
+        status_code=502,
+        usage={},
+        started_at=started_at,
+        error=last_error or "no model configured",
+    )
     raise HTTPException(status_code=502, detail=f"All configured LLM models are unavailable: {last_error or 'no model configured'}")
 
 
 @app.post("/api/chat/stream", response_model=None)
 def chat_stream(
+    request: Request,
     body: ChatRequest,
     token_data: dict = Depends(verify_access_token)
 ) -> StreamingResponse:
     """流式聊天接口（需要 Token 认证）"""
     pathname = _resolve_pathname(body)
     session_id = _resolve_or_create_session_id(body.sessionId)
-    return _build_streaming_response(body, pathname, session_id=session_id)
+    return _build_streaming_response(
+        body,
+        pathname,
+        session_id=session_id,
+        request=request,
+        token_data=token_data,
+        endpoint="/api/chat/stream",
+    )
 
 
 @app.post("/api/session", response_model=None)
@@ -1336,6 +1512,7 @@ def create_session(token_data: dict = Depends(verify_access_token)) -> dict[str,
 
 @app.post("/api/session/{session_id}/message", response_model=None)
 def session_message(
+    request: Request,
     session_id: str,
     body: SessionMessageRequest,
     stream: bool = Query(False, description="是否启用 SSE 流式输出"),
@@ -1347,11 +1524,49 @@ def session_message(
     pathname = _resolve_pathname(chat_body)
 
     if stream:
-        return _build_streaming_response(chat_body, pathname, session_id=session_id)
+        return _build_streaming_response(
+            chat_body,
+            pathname,
+            session_id=session_id,
+            request=request,
+            token_data=token_data,
+            endpoint="/api/session/{session_id}/message",
+        )
 
-    result = run_agent(message, pathname=pathname, session_id=session_id)
-    result["sessionId"] = session_id
-    return result
+    selected_model = select_model_config()
+    usage_collector = _empty_usage()
+    started_at = time.perf_counter()
+    try:
+        result = run_agent(
+            message,
+            pathname=pathname,
+            session_id=session_id,
+            model_config=selected_model,
+            usage_collector=usage_collector,
+        )
+        result["sessionId"] = session_id
+        record_model_usage(
+            request=request,
+            token_data=token_data,
+            model_config=selected_model,
+            endpoint="/api/session/{session_id}/message",
+            status_code=200,
+            usage=usage_collector,
+            started_at=started_at,
+        )
+        return result
+    except Exception as exc:
+        record_model_usage(
+            request=request,
+            token_data=token_data,
+            model_config=selected_model,
+            endpoint="/api/session/{session_id}/message",
+            status_code=500,
+            usage=usage_collector,
+            started_at=started_at,
+            error=str(exc),
+        )
+        raise
 
 
 def main():

@@ -16,6 +16,7 @@ from fastapi import Depends, HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from config import PROJECT_ROOT
+from database import read_api_keys, write_api_keys
 
 # JWT 配置
 SECRET_KEY = os.environ.get("JWT_SECRET_KEY", secrets.token_urlsafe(32))
@@ -272,17 +273,12 @@ def resolve_token_api_key(
 
 def _load_api_keys() -> dict[str, Any]:
     """加载 API Keys"""
-    if not API_KEYS_FILE.exists():
-        return {"keys": []}
-    try:
-        return json.loads(API_KEYS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {"keys": []}
+    return read_api_keys(API_KEYS_FILE)
 
 
 def _save_api_keys(data: dict[str, Any]) -> None:
     """保存 API Keys"""
-    API_KEYS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_api_keys(data)
 
 
 def _new_api_key_id() -> str:

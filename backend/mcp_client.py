@@ -14,6 +14,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field, create_model
 
 from config import PROJECT_ROOT, REFERENCES_DIR
+from database import read_json_config
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,13 @@ def _candidate_config_paths() -> list[Path]:
     ]
 
 
+def load_mcp_config_payload() -> dict[str, Any]:
+    for config_path in _candidate_config_paths():
+        if config_path.exists():
+            return read_json_config("mcp_servers", config_path)
+    return read_json_config("mcp_servers", None)
+
+
 def _read_json_file(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -209,15 +217,11 @@ def load_all_mcp_servers() -> tuple[McpServerConfig, ...]:
     if default_server:
         servers[default_server.name] = default_server
 
-    for config_path in _candidate_config_paths():
-        if not config_path.exists():
-            continue
-        payload = _read_json_file(config_path)
-        for name, raw_server in _iter_custom_server_items(payload):
-            server = _server_from_json(name, raw_server)
-            if server:
-                servers[name] = server
-        break
+    payload = load_mcp_config_payload()
+    for name, raw_server in _iter_custom_server_items(payload):
+        server = _server_from_json(name, raw_server)
+        if server:
+            servers[name] = server
 
     return tuple(servers.values())
 

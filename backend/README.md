@@ -41,8 +41,11 @@
 - `AGENT_MCP_ENABLED`（默认开启，设为 `false` / `0` 可关闭 MCP 接入）
 - `AGENT_MCP_CONFIG`（自定义 MCP JSON 配置路径）
 - `AGENT_MCP_WEBGENERATE`（默认开启，设为 `false` / `0` 可关闭内置 webGenerate MCP）
+- `AGENT_DATABASE_URL`（默认 `sqlite:///./data/agent.sqlite3`；支持 SQLAlchemy URL，如 MySQL/PostgreSQL）
 - `CORS_ORIGINS`
 - `PORT`
+
+数据库会存储管理配置、API Key 和 token 计费记录。MySQL/PostgreSQL 或其他数据库需安装对应驱动并使用对应 SQLAlchemy 方言 URL，表结构 DSL 见 `SQL_DSL.md`。
 
 知识库默认读取顺序：
 

@@ -1,11 +1,13 @@
 from langchain_openai import ChatOpenAI
 
 from agent_settings import AGENT_MAX_RETRIES, AGENT_TEMPERATURE
+from typing import Any
+
 from agent_admin import select_model_config
 
 
-def create_llm(*, streaming: bool):
-    selected_model = select_model_config()
+def create_llm(*, streaming: bool, model_config: dict[str, Any] | None = None):
+    selected_model = model_config or select_model_config()
     api_key = str((selected_model or {}).get("apiKey") or "").strip()
     model_name = str((selected_model or {}).get("model") or (selected_model or {}).get("name") or "").strip()
     base_url = str((selected_model or {}).get("baseURL") or "").strip()
@@ -38,5 +40,7 @@ def create_llm(*, streaming: bool):
         temperature=AGENT_TEMPERATURE,
         max_retries=AGENT_MAX_RETRIES,
         streaming=streaming,
+        stream_usage=streaming,
+        model_kwargs={"stream_options": {"include_usage": True}} if streaming else {},
         use_responses_api=False,
     )

@@ -6,6 +6,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from config import PROJECT_ROOT
+from database import read_json_config, write_json_config
 
 ADMIN_CONFIG_PATH = PROJECT_ROOT / "agent-admin.json"
 _CONFIG_LOCK = threading.Lock()
@@ -21,13 +22,7 @@ def _default_config() -> dict[str, Any]:
 
 
 def _read_config_file() -> dict[str, Any]:
-    if not ADMIN_CONFIG_PATH.exists():
-        return {}
-    try:
-        payload = json.loads(ADMIN_CONFIG_PATH.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
+    return read_json_config("agent_admin", ADMIN_CONFIG_PATH)
 
 
 def _model_id(index: int, model: dict[str, Any]) -> str:
@@ -60,7 +55,20 @@ def _normalize_model(index: int, raw: Any) -> dict[str, Any] | None:
         "latencyMs": raw.get("latencyMs"),
         "lastCheckedAt": raw.get("lastCheckedAt"),
         "lastError": str(raw.get("lastError") or "").strip(),
+        "input_price": _normalize_price(raw.get("input_price")),
+        "output_price": _normalize_price(raw.get("output_price")),
+        "cache_write_price": _normalize_price(raw.get("cache_write_price")),
+        "cache_read_price": _normalize_price(raw.get("cache_read_price")),
     }
+
+
+def _normalize_price(value: Any) -> float:
+    if value in (None, ""):
+        return 0.0
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def normalize_admin_config(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -90,7 +98,7 @@ def load_admin_config() -> dict[str, Any]:
 def save_admin_config(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = normalize_admin_config(payload)
     with _CONFIG_LOCK:
-        ADMIN_CONFIG_PATH.write_text(json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json_config("agent_admin", normalized)
     return normalized
 
 

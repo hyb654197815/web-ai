@@ -53,6 +53,48 @@ function normalizeStatsPayload(payload) {
   };
 }
 
+function normalizeBillingPayload(payload) {
+  const summary = payload?.summary && typeof payload.summary === 'object' ? payload.summary : {};
+  const pagination = payload?.pagination && typeof payload.pagination === 'object' ? payload.pagination : {};
+  return {
+    summary: {
+      total_requests: Number(summary.total_requests || 0),
+      input_tokens: Number(summary.input_tokens || 0),
+      output_tokens: Number(summary.output_tokens || 0),
+      cache_write_tokens: Number(summary.cache_write_tokens || 0),
+      cache_read_tokens: Number(summary.cache_read_tokens || 0),
+      total_tokens: Number(summary.total_tokens || 0),
+      total_cost: Number(summary.total_cost || 0),
+      avg_duration_ms: Number(summary.avg_duration_ms || 0),
+    },
+    records: Array.isArray(payload?.records) ? payload.records : [],
+    pagination: {
+      page: Number(pagination.page || 1),
+      page_size: Number(pagination.page_size || 20),
+      total: Number(pagination.total || 0),
+    },
+  };
+}
+
+function formatNumber(value) {
+  return new Intl.NumberFormat('en-US').format(Number(value || 0));
+}
+
+function formatTokens(value) {
+  const count = Number(value || 0);
+  if (count >= 1000000) return `${(count / 1000000).toFixed(2)}M`;
+  if (count >= 1000) return `${(count / 1000).toFixed(1)}K`;
+  return formatNumber(count);
+}
+
+function formatMoney(value) {
+  return `$${Number(value || 0).toFixed(6)}`;
+}
+
+function formatSeconds(valueMs) {
+  return `${(Number(valueMs || 0) / 1000).toFixed(2)}s`;
+}
+
 function formatDateTime(value, fallback = '--') {
   if (!value) return fallback;
   const date = new Date(value);
@@ -138,6 +180,8 @@ export const AIAgentAdmin = {
   refreshToken: null,
   apiKeys: [],
   stats: null,
+  billing: null,
+  billingFilters: { range: '7d', apiKeyId: '', page: 1, pageSize: 20 },
   logs: [],
   apiKeyFormEditor: null,
   requiresPasswordSetup: false,
@@ -567,6 +611,26 @@ export const AIAgentAdmin = {
     }
   },
 
+  async loadBilling() {
+    this.setBusy(true);
+    try {
+      const params = new URLSearchParams({
+        range: this.billingFilters.range || '7d',
+        page: String(this.billingFilters.page || 1),
+        page_size: String(this.billingFilters.pageSize || 20),
+      });
+      if (this.billingFilters.apiKeyId) params.set('api_key_id', this.billingFilters.apiKeyId);
+      const payload = await this.request(`/admin/billing/usage?${params.toString()}`);
+      this.billing = normalizeBillingPayload(payload);
+    } catch (error) {
+      this.toast(`加载计费数据失败：${error.message}`);
+      this.billing = normalizeBillingPayload(null);
+    } finally {
+      this.setBusy(false);
+      this.render();
+    }
+  },
+
   async loadLogs(logType = 'request', limit = 100) {
     this.setBusy(true);
     try {
@@ -694,9 +758,12 @@ export const AIAgentAdmin = {
 
     if (action === 'close') this.close();
     if (action === 'view') {
-      this.activeView = id;
+        this.activeView = id;
       if (id === 'api-keys') this.loadAPIKeys();
       if (id === 'stats') this.loadStats();
+      if (id === 'billing') {
+        Promise.all([this.loadAPIKeys(), this.loadBilling()]).catch(() => {});
+      }
       if (id === 'logs') this.loadLogs();
       this.render();
     }
@@ -733,6 +800,8 @@ export const AIAgentAdmin = {
     if (action === 'refresh-api-keys') this.loadAPIKeys();
     if (action === 'unblock-ip') this.unblockIP(id);
     if (action === 'refresh-stats') this.loadStats();
+    if (action === 'refresh-billing') this.loadBilling();
+    if (action === 'billing-page') this.setBillingPage(Number(id || 1));
     if (action === 'refresh-logs') this.loadLogs();
   },
 
@@ -753,6 +822,14 @@ export const AIAgentAdmin = {
       if (this.apiKeyFormEditor) {
         this.apiKeyFormEditor[key] = target.type === 'number' ? Number(target.value) : target.value;
       }
+      return;
+    }
+
+    if (bind.startsWith('billingFilters.')) {
+      const key = bind.split('.')[1];
+      this.billingFilters[key] = target.type === 'number' ? Number(target.value) : target.value;
+      if (key !== 'page') this.billingFilters.page = 1;
+      this.loadBilling();
       return;
     }
 
@@ -803,6 +880,11 @@ export const AIAgentAdmin = {
     if (group === 'lb') {
       this.state.loadBalancing[id] = value;
     }
+    if (group === 'billingFilters') {
+      this.billingFilters[id] = value;
+      if (id !== 'page') this.billingFilters.page = 1;
+      this.loadBilling();
+    }
   },
 
   parseEnv(value) {
@@ -823,6 +905,14 @@ export const AIAgentAdmin = {
     server.enabled = !server.enabled;
     server.status = server.enabled ? 'unknown' : 'disabled';
     this.render();
+  },
+
+  setBillingPage(page) {
+    const total = this.billing?.pagination?.total || 0;
+    const size = this.billing?.pagination?.page_size || this.billingFilters.pageSize || 20;
+    const maxPage = Math.max(1, Math.ceil(total / size));
+    this.billingFilters.page = Math.max(1, Math.min(maxPage, Number(page || 1)));
+    this.loadBilling();
   },
 
   addMcp() {
@@ -982,6 +1072,10 @@ export const AIAgentAdmin = {
       apiKey: '',
       enabled: true,
       weight: 1,
+      input_price: 0,
+      output_price: 0,
+      cache_write_price: 0,
+      cache_read_price: 0,
     };
     this.render();
   },
@@ -999,6 +1093,10 @@ export const AIAgentAdmin = {
       apiKey: model.apiKey || '',
       enabled: model.enabled !== false,
       weight: model.weight || 1,
+      input_price: Number(model.input_price || 0),
+      output_price: Number(model.output_price || 0),
+      cache_write_price: Number(model.cache_write_price || 0),
+      cache_read_price: Number(model.cache_read_price || 0),
     };
     this.render();
   },
@@ -1026,6 +1124,10 @@ export const AIAgentAdmin = {
       apiKey: String(this.modelFormEditor.apiKey || '').trim(),
       enabled: this.modelFormEditor.enabled !== false,
       weight: Math.max(1, Number(this.modelFormEditor.weight || 1)),
+      input_price: Math.max(0, Number(this.modelFormEditor.input_price || 0)),
+      output_price: Math.max(0, Number(this.modelFormEditor.output_price || 0)),
+      cache_write_price: Math.max(0, Number(this.modelFormEditor.cache_write_price || 0)),
+      cache_read_price: Math.max(0, Number(this.modelFormEditor.cache_read_price || 0)),
       status: 'unknown',
       latencyMs: null,
       lastError: '',
@@ -1540,6 +1642,10 @@ export const AIAgentAdmin = {
         color: #9ea6b2;
         background: rgba(158, 166, 178, 0.14);
       }
+      .status-badge.bad {
+        color: #e06464;
+        background: rgba(224, 100, 100, 0.14);
+      }
       .api-key-actions {
         display: inline-flex;
         align-items: center;
@@ -1643,6 +1749,102 @@ export const AIAgentAdmin = {
         color: #e8e8e8;
         font-size: 28px;
         font-weight: 650;
+      }
+      .stat-value.money, .money {
+        color: #43d18d;
+      }
+      .stat-hint {
+        margin-top: 6px;
+        color: #858585;
+        font-size: 11px;
+      }
+      .billing-summary-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(180px, 1fr));
+        gap: 16px;
+        margin-bottom: 18px;
+      }
+      .billing-toolbar {
+        display: flex;
+        align-items: flex-end;
+        gap: 12px;
+        padding: 14px;
+        margin-bottom: 18px;
+        border: 1px solid #252525;
+        border-radius: 8px;
+        background: #1e1e1e;
+      }
+      .field.compact {
+        width: min(220px, 100%);
+      }
+      .billing-table-wrap {
+        overflow: auto;
+        border: 1px solid #252525;
+        border-radius: 8px;
+        background: #1a1a1a;
+      }
+      .billing-table {
+        width: 100%;
+        min-width: 1180px;
+        border-collapse: collapse;
+      }
+      .billing-table th,
+      .billing-table td {
+        padding: 13px 16px;
+        border-bottom: 1px solid #262626;
+        text-align: left;
+        vertical-align: middle;
+        font-size: 12px;
+      }
+      .billing-table th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        color: #8e8e8e;
+        background: #202020;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .billing-table tbody tr:hover {
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .token-stack {
+        display: grid;
+        gap: 4px;
+        color: #c8d0dc;
+      }
+      .token-stack span + span {
+        color: #7f8998;
+      }
+      .ua-cell {
+        max-width: 340px;
+        color: #9ca6b5;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .table-empty {
+        height: 96px;
+        color: #858585;
+        text-align: center !important;
+      }
+      .pagination-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-top: 14px;
+        color: #9a9a9a;
+        font-size: 12px;
+      }
+      .pager {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .btn:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
       }
       .logs-container {
         max-height: 600px;
@@ -1814,6 +2016,9 @@ export const AIAgentAdmin = {
       case 'stats':
         contentHTML = this.renderStatsView();
         break;
+      case 'billing':
+        contentHTML = this.renderBillingView();
+        break;
       case 'logs':
         contentHTML = this.renderLogsView();
         break;
@@ -1841,6 +2046,7 @@ export const AIAgentAdmin = {
       ['mcp', '&', 'Tools & MCP'],
       ['api-keys', 'K', 'API Keys'],
       ['stats', 'S', 'Stats'],
+      ['billing', '$', 'Usage'],
       ['logs', 'L', 'Logs'],
     ];
     return `
@@ -1888,6 +2094,11 @@ export const AIAgentAdmin = {
       stats: {
         title: '统计数据',
         subtitle: '查看请求统计、成功率和被封禁 IP。',
+        showSave: false
+      },
+      billing: {
+        title: 'Token 计费',
+        subtitle: '查看模型调用的 token、费用、耗时与请求明细。',
         showSave: false
       },
       logs: {
@@ -2068,6 +2279,22 @@ export const AIAgentAdmin = {
               <div class="field">
                 <label>Weight</label>
                 <input type="number" data-bind="modelForm.weight" value="${this.modelFormEditor.weight}" min="1" max="100" />
+              </div>
+              <div class="field">
+                <label>Input Price / 1M tokens</label>
+                <input type="number" data-bind="modelForm.input_price" value="${this.modelFormEditor.input_price}" min="0" step="0.000001" />
+              </div>
+              <div class="field">
+                <label>Output Price / 1M tokens</label>
+                <input type="number" data-bind="modelForm.output_price" value="${this.modelFormEditor.output_price}" min="0" step="0.000001" />
+              </div>
+              <div class="field">
+                <label>Cache Write Price / 1M tokens</label>
+                <input type="number" data-bind="modelForm.cache_write_price" value="${this.modelFormEditor.cache_write_price}" min="0" step="0.000001" />
+              </div>
+              <div class="field">
+                <label>Cache Read Price / 1M tokens</label>
+                <input type="number" data-bind="modelForm.cache_read_price" value="${this.modelFormEditor.cache_read_price}" min="0" step="0.000001" />
               </div>
               <div class="field full">
                 <label>Base URL ${this.modelFormEditor.provider === 'Anthropic' ? '(optional)' : '*'}</label>
@@ -2289,6 +2516,117 @@ export const AIAgentAdmin = {
           `).join('')}
         </section>
       ` : ''}
+    `;
+  },
+
+  renderBillingView() {
+    if (!this.billing) {
+      return `<div class="empty-state"><p>加载中...</p></div>`;
+    }
+
+    const summary = this.billing.summary;
+    const records = this.billing.records || [];
+    const pagination = this.billing.pagination || { page: 1, page_size: 20, total: 0 };
+    const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / (pagination.page_size || 20)));
+    const start = pagination.total ? (pagination.page - 1) * pagination.page_size + 1 : 0;
+    const end = Math.min(pagination.total, pagination.page * pagination.page_size);
+
+    return `
+      <div class="billing-summary-grid">
+        <div class="stat-card">
+          <div class="stat-label">总请求数</div>
+          <div class="stat-value">${formatNumber(summary.total_requests)}</div>
+          <div class="stat-hint">所选范围内</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">总 Token</div>
+          <div class="stat-value">${formatTokens(summary.total_tokens)}</div>
+          <div class="stat-hint">输入 ${formatTokens(summary.input_tokens)} / 输出 ${formatTokens(summary.output_tokens)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">总消费</div>
+          <div class="stat-value money">${formatMoney(summary.total_cost)}</div>
+          <div class="stat-hint">按模型价格估算</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">平均耗时</div>
+          <div class="stat-value">${formatSeconds(summary.avg_duration_ms)}</div>
+          <div class="stat-hint">每次请求</div>
+        </div>
+      </div>
+      <section class="billing-toolbar">
+        <div class="field compact">
+          <label>API 密钥</label>
+          <select data-bind="billingFilters.apiKeyId">
+            <option value="" ${!this.billingFilters.apiKeyId ? 'selected' : ''}>全部密钥</option>
+            ${this.apiKeys.map((key) => `<option value="${escapeHTML(key.id || '')}" ${this.billingFilters.apiKeyId === key.id ? 'selected' : ''}>${escapeHTML(key.name || key.api_key || key.id || '')}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field compact">
+          <label>时间范围</label>
+          <select data-bind="billingFilters.range">
+            ${['1d', '7d', '30d', '90d'].map((value) => `<option value="${value}" ${this.billingFilters.range === value ? 'selected' : ''}>近 ${value.replace('d', ' 天')}</option>`).join('')}
+          </select>
+        </div>
+        <button class="btn" data-action="refresh-billing" type="button">刷新</button>
+      </section>
+      <section class="billing-table-wrap">
+        <table class="billing-table">
+          <thead>
+            <tr>
+              <th>API 密钥</th>
+              <th>模型</th>
+              <th>端点</th>
+              <th>类型</th>
+              <th>Token</th>
+              <th>费用</th>
+              <th>耗时</th>
+              <th>时间</th>
+              <th>User-Agent</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${records.length ? records.map((record) => this.renderBillingRecord(record)).join('') : '<tr><td colspan="9" class="table-empty">暂无计费记录</td></tr>'}
+          </tbody>
+        </table>
+      </section>
+      <div class="pagination-bar">
+        <span>显示 ${formatNumber(start)} 至 ${formatNumber(end)} 共 ${formatNumber(pagination.total)} 条结果</span>
+        <div class="pager">
+          <button class="btn" data-action="billing-page" data-id="${pagination.page - 1}" ${pagination.page <= 1 ? 'disabled' : ''} type="button">上一页</button>
+          <span>${pagination.page} / ${totalPages}</span>
+          <button class="btn" data-action="billing-page" data-id="${pagination.page + 1}" ${pagination.page >= totalPages ? 'disabled' : ''} type="button">下一页</button>
+        </div>
+      </div>
+    `;
+  },
+
+  renderBillingRecord(record) {
+    const input = Number(record.input_tokens || 0);
+    const output = Number(record.output_tokens || 0);
+    const cacheWrite = Number(record.cache_write_tokens || 0);
+    const cacheRead = Number(record.cache_read_tokens || 0);
+    const statusClassName = Number(record.status_code || 0) >= 400 ? 'bad' : 'ok';
+    return `
+      <tr>
+        <td>${escapeHTML(record.api_key_prefix || record.api_key_id || '--')}</td>
+        <td>
+          <div class="api-key-name">${escapeHTML(record.model_name || '--')}</div>
+          <div class="api-key-subtext">${escapeHTML(record.provider || record.model_id || '')}</div>
+        </td>
+        <td>${escapeHTML(record.endpoint || '')}</td>
+        <td><span class="status-badge ${statusClassName}">${escapeHTML(record.status_code || '')}</span></td>
+        <td>
+          <div class="token-stack">
+            <span>in ${formatTokens(input)} / out ${formatTokens(output)}</span>
+            <span>write ${formatTokens(cacheWrite)} / read ${formatTokens(cacheRead)}</span>
+          </div>
+        </td>
+        <td><span class="money">${formatMoney(record.cost)}</span></td>
+        <td>${formatSeconds(record.duration_ms)}</td>
+        <td>${escapeHTML(formatDateTime(record.created_at))}</td>
+        <td class="ua-cell" title="${escapeHTML(record.user_agent || '')}">${escapeHTML(record.user_agent || '--')}</td>
+      </tr>
     `;
   },
 
