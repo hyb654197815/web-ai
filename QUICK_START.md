@@ -63,6 +63,7 @@ ADMIN_PASSWORD=your-strong-password
 JWT_SECRET_KEY=your-random-secret
 ACCESS_TOKEN_EXPIRE_MINUTES=15
 ENABLE_ADMIN_BACKEND=true
+DISABLE_AGENT_AUTH=false
 # 默认使用 SQLite：data/agent.sqlite3
 # AGENT_DATABASE_URL=mysql+pymysql://user:password@127.0.0.1:3306/web_ai?charset=utf8mb4
 ```
@@ -142,6 +143,16 @@ AIAgent.init({
   },
 });
 ```
+
+### 本地调试免鉴权
+
+如果你想让用户在本地直接调试，不想配置 API Key 和 token，可以在 `backend/.env` 中打开：
+
+```env
+DISABLE_AGENT_AUTH=true
+```
+
+开启后前端 Agent 可以直接匿名调用 `/api/chat`、`/api/session/*`、`/api/page-agent/chat/completions`，无需再填写 `apiKey` 或实现 `getToken()`。
 
 ## 9. 你的服务如何提供 `/internal/agent/token`
 

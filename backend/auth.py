@@ -15,7 +15,7 @@ from jwt import ExpiredSignatureError, InvalidTokenError
 from fastapi import Depends, HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from config import PROJECT_ROOT
+from config import DISABLE_AGENT_AUTH, PROJECT_ROOT
 from database import read_api_keys, write_api_keys
 
 # JWT 配置
@@ -34,7 +34,7 @@ _RUNTIME_ADMIN_SETTINGS: dict[str, str | None] = {"username": None, "password": 
 API_KEYS_FILE = PROJECT_ROOT / "api-keys.json"
 _API_KEYS_LOCK = threading.Lock()
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 class ApiKeyRateLimiter:
@@ -202,17 +202,23 @@ def verify_token(token: str, token_type: str = "access") -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
-def verify_access_token(credentials: HTTPAuthorizationCredentials = Security(security)) -> dict:
+def verify_access_token(credentials: HTTPAuthorizationCredentials | None = Security(security)) -> dict:
     """验证访问 Token（用于保护接口）"""
+    if DISABLE_AGENT_AUTH:
+        return {"role": "debug", "auth_disabled": True}
+    if credentials is None or not str(credentials.credentials or "").strip():
+        raise HTTPException(status_code=401, detail="Authorization token required")
     payload = verify_token(credentials.credentials, "access")
     resolve_token_api_key(payload, enforce_rate_limit=True, update_usage=True)
     return payload
 
 
-def verify_admin_token(credentials: HTTPAuthorizationCredentials = Security(security)) -> dict:
+def verify_admin_token(credentials: HTTPAuthorizationCredentials | None = Security(security)) -> dict:
     """验证管理员 Token"""
     if is_default_admin_password():
         raise HTTPException(status_code=403, detail="Default admin password must be changed before admin login")
+    if credentials is None or not str(credentials.credentials or "").strip():
+        raise HTTPException(status_code=401, detail="Authorization token required")
     payload = verify_token(credentials.credentials, "access")
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
@@ -460,6 +466,8 @@ def delete_api_key(api_key: str) -> bool:
 
 async def get_api_key_from_request(request: Request) -> str:
     """从请求中提取 API Key（支持多种方式）"""
+    if DISABLE_AGENT_AUTH:
+        return ""
     # 1. 从 Header 获取
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
@@ -486,6 +494,8 @@ async def get_api_key_from_request(request: Request) -> str:
 
 async def verify_api_key_dependency(request: Request) -> dict[str, Any]:
     """验证 API Key（用于保护 AI 接口）"""
+    if DISABLE_AGENT_AUTH:
+        return {"role": "debug", "auth_disabled": True}
     api_key = await get_api_key_from_request(request)
     key_info = validate_api_key(api_key)
     api_key_rate_limiter.check(
@@ -501,6 +511,15 @@ async def verify_api_key_dependency(request: Request) -> dict[str, Any]:
 
 def exchange_api_key_for_token(api_key: str) -> dict[str, str]:
     """使用 API Key 换取 Token"""
+    if DISABLE_AGENT_AUTH:
+        access_token = create_access_token(data={"sub": "debug", "role": "debug", "auth_disabled": True})
+        refresh_token = create_refresh_token(data={"sub": "debug", "role": "debug", "auth_disabled": True})
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        }
     key_info = validate_api_key(api_key)
     key_id = str(key_info.get("id") or "").strip()
 

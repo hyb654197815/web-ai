@@ -69,5 +69,8 @@ CORS_ORIGINS = os.environ.get("CORS_ORIGINS", "*").strip().split(",") if os.envi
 # 是否启用管理后台与管理接口
 ENABLE_ADMIN_BACKEND = os.environ.get("ENABLE_ADMIN_BACKEND", "true").strip().lower() not in {"0", "false", "no", "off", "disabled"}
 
+# 是否关闭 Agent API 鉴权，关闭后前端调试可直接匿名访问 AI 接口
+DISABLE_AGENT_AUTH = os.environ.get("DISABLE_AGENT_AUTH", "false").strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
 # 服务端口
 PORT = int(os.environ.get("PORT", "4096"))

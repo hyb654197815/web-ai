@@ -76,6 +76,18 @@ function normalizeBillingPayload(payload) {
   };
 }
 
+function normalizeSessionsPayload(payload) {
+  const pagination = payload?.pagination && typeof payload.pagination === 'object' ? payload.pagination : {};
+  return {
+    records: Array.isArray(payload?.records) ? payload.records : [],
+    pagination: {
+      page: Number(pagination.page || 1),
+      page_size: Number(pagination.page_size || 20),
+      total: Number(pagination.total || 0),
+    },
+  };
+}
+
 function formatNumber(value) {
   return new Intl.NumberFormat('en-US').format(Number(value || 0));
 }
@@ -182,6 +194,9 @@ export const AIAgentAdmin = {
   stats: null,
   billing: null,
   billingFilters: { range: '7d', apiKeyId: '', page: 1, pageSize: 20 },
+  sessions: null,
+  sessionFilters: { page: 1, pageSize: 20 },
+  sessionDetail: null,
   logs: [],
   apiKeyFormEditor: null,
   requiresPasswordSetup: false,
@@ -631,6 +646,49 @@ export const AIAgentAdmin = {
     }
   },
 
+  async loadSessions() {
+    this.setBusy(true);
+    try {
+      const params = new URLSearchParams({
+        page: String(this.sessionFilters.page || 1),
+        page_size: String(this.sessionFilters.pageSize || 20),
+      });
+      const payload = await this.request(`/admin/sessions?${params.toString()}`);
+      this.sessions = normalizeSessionsPayload(payload);
+    } catch (error) {
+      this.toast(`加载 Sessions 失败：${error.message}`);
+      this.sessions = normalizeSessionsPayload(null);
+    } finally {
+      this.setBusy(false);
+      this.render();
+    }
+  },
+
+  async openSessionDetail(sessionId) {
+    const value = String(sessionId || '').trim();
+    if (!value) return;
+    this.setBusy(true);
+    try {
+      const payload = await this.request(`/admin/sessions/${encodeURIComponent(value)}`);
+      this.sessionDetail = {
+        sessionId: payload?.sessionId || value,
+        records: Array.isArray(payload?.records) ? payload.records : [],
+        total: Number(payload?.total || 0),
+      };
+    } catch (error) {
+      this.toast(`加载 Session 详情失败：${error.message}`);
+      this.sessionDetail = null;
+    } finally {
+      this.setBusy(false);
+      this.render();
+    }
+  },
+
+  closeSessionDetail() {
+    this.sessionDetail = null;
+    this.render();
+  },
+
   async loadLogs(logType = 'request', limit = 100) {
     this.setBusy(true);
     try {
@@ -764,6 +822,7 @@ export const AIAgentAdmin = {
       if (id === 'billing') {
         Promise.all([this.loadAPIKeys(), this.loadBilling()]).catch(() => {});
       }
+      if (id === 'sessions') this.loadSessions();
       if (id === 'logs') this.loadLogs();
       this.render();
     }
@@ -802,6 +861,10 @@ export const AIAgentAdmin = {
     if (action === 'refresh-stats') this.loadStats();
     if (action === 'refresh-billing') this.loadBilling();
     if (action === 'billing-page') this.setBillingPage(Number(id || 1));
+    if (action === 'refresh-sessions') this.loadSessions();
+    if (action === 'session-page') this.setSessionPage(Number(id || 1));
+    if (action === 'view-session') this.openSessionDetail(id);
+    if (action === 'close-session-detail') this.closeSessionDetail();
     if (action === 'refresh-logs') this.loadLogs();
   },
 
@@ -913,6 +976,14 @@ export const AIAgentAdmin = {
     const maxPage = Math.max(1, Math.ceil(total / size));
     this.billingFilters.page = Math.max(1, Math.min(maxPage, Number(page || 1)));
     this.loadBilling();
+  },
+
+  setSessionPage(page) {
+    const total = this.sessions?.pagination?.total || 0;
+    const size = this.sessions?.pagination?.page_size || this.sessionFilters.pageSize || 20;
+    const maxPage = Math.max(1, Math.ceil(total / size));
+    this.sessionFilters.page = Math.max(1, Math.min(maxPage, Number(page || 1)));
+    this.loadSessions();
   },
 
   addMcp() {
@@ -1788,6 +1859,75 @@ export const AIAgentAdmin = {
         min-width: 1180px;
         border-collapse: collapse;
       }
+      .sessions-table {
+        width: 100%;
+        min-width: 1040px;
+        border-collapse: collapse;
+      }
+      .sessions-table th,
+      .sessions-table td {
+        padding: 13px 16px;
+        border-bottom: 1px solid #262626;
+        text-align: left;
+        vertical-align: top;
+        font-size: 12px;
+      }
+      .sessions-table th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        color: #8e8e8e;
+        background: #202020;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .sessions-table tbody tr:hover {
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .session-id {
+        color: #e8e8e8;
+        font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+        font-size: 11px;
+      }
+      .session-preview {
+        max-width: 420px;
+        color: #9ca6b5;
+        line-height: 1.6;
+      }
+      .session-detail-body {
+        display: grid;
+        gap: 12px;
+        padding: 16px;
+        overflow-y: auto;
+        background: #151515;
+      }
+      .session-message {
+        padding: 14px;
+        border: 1px solid #262626;
+        border-radius: 8px;
+        background: #1e1e1e;
+      }
+      .session-message.user {
+        border-color: rgba(54, 124, 255, 0.28);
+        background: rgba(37, 99, 235, 0.08);
+      }
+      .session-message.assistant {
+        border-color: rgba(67, 184, 119, 0.22);
+      }
+      .session-message-meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 8px;
+        color: #8e8e8e;
+        font-size: 11px;
+      }
+      .session-message-content {
+        color: #d7d7d7;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
       .billing-table th,
       .billing-table td {
         padding: 13px 16px;
@@ -2019,6 +2159,9 @@ export const AIAgentAdmin = {
       case 'billing':
         contentHTML = this.renderBillingView();
         break;
+      case 'sessions':
+        contentHTML = this.renderSessionsView();
+        break;
       case 'logs':
         contentHTML = this.renderLogsView();
         break;
@@ -2037,6 +2180,7 @@ export const AIAgentAdmin = {
       ${this.renderMcpFormEditor()}
       ${this.renderModelFormEditor()}
       ${this.renderAPIKeyFormEditor()}
+      ${this.renderSessionDetail()}
     `;
   },
 
@@ -2047,6 +2191,7 @@ export const AIAgentAdmin = {
       ['api-keys', 'K', 'API Keys'],
       ['stats', 'S', 'Stats'],
       ['billing', '$', 'Usage'],
+      ['sessions', '@', 'Sessions'],
       ['logs', 'L', 'Logs'],
     ];
     return `
@@ -2099,6 +2244,11 @@ export const AIAgentAdmin = {
       billing: {
         title: 'Token 计费',
         subtitle: '查看模型调用的 token、费用、耗时与请求明细。',
+        showSave: false
+      },
+      sessions: {
+        title: 'Sessions',
+        subtitle: '查看每个 session 的对话历史，便于排查和后续模型调优。',
         showSave: false
       },
       logs: {
@@ -2627,6 +2777,101 @@ export const AIAgentAdmin = {
         <td>${escapeHTML(formatDateTime(record.created_at))}</td>
         <td class="ua-cell" title="${escapeHTML(record.user_agent || '')}">${escapeHTML(record.user_agent || '--')}</td>
       </tr>
+    `;
+  },
+
+  renderSessionsView() {
+    if (!this.sessions) {
+      return `<div class="empty-state"><p>加载中...</p></div>`;
+    }
+
+    const records = this.sessions.records || [];
+    const pagination = this.sessions.pagination || { page: 1, page_size: 20, total: 0 };
+    const totalPages = Math.max(1, Math.ceil((pagination.total || 0) / (pagination.page_size || 20)));
+    const start = pagination.total ? (pagination.page - 1) * pagination.page_size + 1 : 0;
+    const end = Math.min(pagination.total, pagination.page * pagination.page_size);
+
+    return `
+      <section class="billing-table-wrap">
+        <table class="sessions-table">
+          <thead>
+            <tr>
+              <th>Session ID</th>
+              <th>消息数</th>
+              <th>最近页面</th>
+              <th>最近消息</th>
+              <th>最近时间</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${records.length ? records.map((record) => this.renderSessionRow(record)).join('') : '<tr><td colspan="6" class="table-empty">暂无 Session 记录</td></tr>'}
+          </tbody>
+        </table>
+      </section>
+      <div class="pagination-bar">
+        <span>显示 ${formatNumber(start)} 至 ${formatNumber(end)} 共 ${formatNumber(pagination.total)} 条结果</span>
+        <div class="pager">
+          <button class="btn" data-action="session-page" data-id="${pagination.page - 1}" ${pagination.page <= 1 ? 'disabled' : ''} type="button">上一页</button>
+          <span>${pagination.page} / ${totalPages}</span>
+          <button class="btn" data-action="session-page" data-id="${pagination.page + 1}" ${pagination.page >= totalPages ? 'disabled' : ''} type="button">下一页</button>
+        </div>
+      </div>
+    `;
+  },
+
+  renderSessionRow(record) {
+    const preview = String(record.last_content || '').trim();
+    const limitedPreview = preview.length > 120 ? `${preview.slice(0, 120)}...` : preview || '--';
+    return `
+      <tr>
+        <td><span class="session-id">${escapeHTML(record.session_id || '--')}</span></td>
+        <td>${formatNumber(record.message_count || 0)}</td>
+        <td>${escapeHTML(record.pathname || '--')}</td>
+        <td class="session-preview" title="${escapeHTML(preview)}">${escapeHTML(limitedPreview)}</td>
+        <td>${escapeHTML(formatDateTime(record.last_message_at))}</td>
+        <td>
+          <button class="api-key-action" data-action="view-session" data-id="${escapeHTML(record.session_id || '')}" type="button">查看对话</button>
+        </td>
+      </tr>
+    `;
+  },
+
+  renderSessionDetail() {
+    if (!this.sessionDetail) return '';
+    const records = this.sessionDetail.records || [];
+    return `
+      <div class="json-dialog-backdrop">
+        <section class="json-dialog" role="dialog" aria-modal="true" aria-label="Session Detail">
+          <div class="json-dialog-header">
+            <div>
+              <div class="json-dialog-title">Session: ${escapeHTML(this.sessionDetail.sessionId || '--')}</div>
+              <div class="row-desc">共 ${formatNumber(this.sessionDetail.total || records.length)} 条消息，用于查看历史上下文与模型输出。</div>
+            </div>
+            <button class="btn" data-action="close-session-detail" type="button">关闭</button>
+          </div>
+          <div class="session-detail-body">
+            ${records.length ? records.map((record) => this.renderSessionMessage(record)).join('') : '<div class="empty-state"><p>暂无对话内容</p></div>'}
+          </div>
+          <div class="json-dialog-footer">
+            <button class="btn" data-action="close-session-detail" type="button">关闭</button>
+          </div>
+        </section>
+      </div>
+    `;
+  },
+
+  renderSessionMessage(record) {
+    const role = String(record.role || 'assistant').toLowerCase();
+    const label = role === 'user' ? '用户' : '助手';
+    return `
+      <section class="session-message ${escapeHTML(role)}">
+        <div class="session-message-meta">
+          <span>${escapeHTML(label)} · ${escapeHTML(record.pathname || '--')}</span>
+          <span>${escapeHTML(formatDateTime(record.created_at))}</span>
+        </div>
+        <div class="session-message-content">${escapeHTML(record.content || '')}</div>
+      </section>
     `;
   },
 

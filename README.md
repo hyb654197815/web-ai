@@ -126,6 +126,7 @@ ADMIN_PASSWORD=your-strong-password
 JWT_SECRET_KEY=your-long-random-secret
 ACCESS_TOKEN_EXPIRE_MINUTES=15
 ENABLE_ADMIN_BACKEND=true
+DISABLE_AGENT_AUTH=false
 # 默认使用 SQLite：data/agent.sqlite3；可选配置 MySQL/PostgreSQL
 # AGENT_DATABASE_URL=postgresql+psycopg://user:password@127.0.0.1:5432/web_ai
 ```
@@ -202,6 +203,12 @@ await AIAgent.sendMessage("带我去用户管理");
 ## 生产环境推荐接法
 
 生产环境建议使用 `selfAuth=false`，不要把 `apiKey` 下发到前端。
+
+如果只是本地调试，也可以直接在后端环境变量里设置 `DISABLE_AGENT_AUTH=true`。开启后：
+
+- 前端 Agent 可不传 `apiKey`
+- 不再要求 token 鉴权
+- 适合联调与页面操作调试，不建议用于生产环境
 
 ```js
 import AIAgent from "portable-ai-agent-widget";

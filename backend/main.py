@@ -38,8 +38,8 @@ from auth import (
     verify_api_key_dependency,
     verify_token,
 )
-from config import CORS_ORIGINS, ENABLE_ADMIN_BACKEND, PORT, PROJECT_ROOT, REFERENCES_DIR
-from database import write_json_config
+from config import CORS_ORIGINS, DISABLE_AGENT_AUTH, ENABLE_ADMIN_BACKEND, PORT, PROJECT_ROOT, REFERENCES_DIR
+from database import query_session_messages, query_session_overview, record_session_message, write_json_config
 from mcp_client import inspect_mcp_server, load_all_mcp_servers, mcp_server_from_payload
 from request_logger import abuse_detector, get_recent_logs, log_api_key_event, log_request, log_security_event, request_stats
 
@@ -943,6 +943,43 @@ def get_billing_usage_endpoint(
     return get_billing_usage(range, api_key_id=api_key_id, page=page, page_size=page_size)
 
 
+@app.get("/api/admin/sessions")
+def get_sessions_endpoint(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    _: dict = Depends(verify_admin_token),
+):
+    """获取 session 列表（需要管理员权限）"""
+    ensure_admin_backend_enabled()
+    size = max(1, min(100, int(page_size or 20)))
+    current_page = max(1, int(page or 1))
+    result = query_session_overview(limit=size, offset=(current_page - 1) * size)
+    return {
+        "records": result["records"],
+        "pagination": {
+            "page": current_page,
+            "page_size": size,
+            "total": result["total"],
+        },
+    }
+
+
+@app.get("/api/admin/sessions/{session_id}")
+def get_session_detail_endpoint(
+    session_id: str,
+    limit: int = Query(200, ge=1, le=500),
+    _: dict = Depends(verify_admin_token),
+):
+    """获取单个 session 的对话历史（需要管理员权限）"""
+    ensure_admin_backend_enabled()
+    result = query_session_messages(session_id=session_id, limit=limit, offset=0)
+    return {
+        "sessionId": session_id,
+        "records": list(reversed(result["records"])),
+        "total": result["total"],
+    }
+
+
 @app.post("/api/admin/unblock-ip")
 def unblock_ip(
     ip: str = Query(..., description="要解封的 IP"),
@@ -990,6 +1027,7 @@ def page_agent_config() -> dict[str, Any]:
     return {
         "enabled": _page_agent_llm_enabled(selected),
         "model": str((selected or {}).get("model") or (selected or {}).get("name") or "").strip(),
+        "authDisabled": DISABLE_AGENT_AUTH,
     }
 
 
@@ -1227,6 +1265,55 @@ def _empty_usage() -> dict[str, int]:
     }
 
 
+def _truncate_session_content(value: Any, limit: int = 8000) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text if len(text) <= limit else f"{text[:limit]}..."
+
+
+def _record_session_turn(
+    *,
+    session_id: str,
+    pathname: str,
+    endpoint: str,
+    token_data: dict[str, Any] | None,
+    user_message: str | None = None,
+    assistant_message: str | None = None,
+) -> None:
+    key_id = None
+    key_prefix = None
+    if isinstance(token_data, dict) and token_data.get("role") not in {"admin", "debug"}:
+        key_id = str(token_data.get("key_id") or "").strip() or None
+        key_prefix = str(token_data.get("api_key") or "").strip() or None
+
+    if user_message:
+        record_session_message(
+            {
+                "session_id": session_id,
+                "api_key_id": key_id,
+                "api_key_prefix": key_prefix,
+                "pathname": pathname,
+                "endpoint": endpoint,
+                "role": "user",
+                "content": _truncate_session_content(user_message),
+            }
+        )
+
+    if assistant_message:
+        record_session_message(
+            {
+                "session_id": session_id,
+                "api_key_id": key_id,
+                "api_key_prefix": key_prefix,
+                "pathname": pathname,
+                "endpoint": endpoint,
+                "role": "assistant",
+                "content": _truncate_session_content(assistant_message),
+            }
+        )
+
+
 def _stream_chat_events(
     body: ChatRequest,
     pathname: str,
@@ -1241,6 +1328,7 @@ def _stream_chat_events(
 ) -> Iterator[str]:
     status_code = 200
     error_message = None
+    final_message = ""
     event_iter = stream_agent_events(
         body.message,
         pathname=pathname,
@@ -1260,6 +1348,7 @@ def _stream_chat_events(
 
             if event_name == "final" and isinstance(payload.get("payload"), dict):
                 payload["payload"]["sessionId"] = session_id
+                final_message = str(payload["payload"].get("message") or "").strip()
 
             yield _encode_sse(event_name, payload)
     except GeneratorExit:
@@ -1284,6 +1373,14 @@ def _stream_chat_events(
         yield _encode_sse("error", {"message": f"stream failed: {exc}", "sessionId": session_id})
 
     yield _encode_sse("done", {"ok": True, "sessionId": session_id})
+    _record_session_turn(
+        session_id=session_id,
+        pathname=pathname,
+        endpoint=endpoint,
+        token_data=token_data,
+        user_message=body.message,
+        assistant_message=final_message,
+    )
     record_model_usage(
         request=request,
         token_data=token_data,
@@ -1362,6 +1459,14 @@ def chat(
             usage_collector=usage_collector,
         )
         result["sessionId"] = session_id
+        _record_session_turn(
+            session_id=session_id,
+            pathname=pathname,
+            endpoint="/api/chat",
+            token_data=token_data,
+            user_message=body.message,
+            assistant_message=result.get("message"),
+        )
         record_model_usage(
             request=request,
             token_data=token_data,
@@ -1545,6 +1650,14 @@ def session_message(
             usage_collector=usage_collector,
         )
         result["sessionId"] = session_id
+        _record_session_turn(
+            session_id=session_id,
+            pathname=pathname,
+            endpoint="/api/session/{session_id}/message",
+            token_data=token_data,
+            user_message=message,
+            assistant_message=result.get("message"),
+        )
         record_model_usage(
             request=request,
             token_data=token_data,

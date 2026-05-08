@@ -94,7 +94,7 @@ def calculate_cost(model_config: dict[str, Any] | None, usage: dict[str, int]) -
 
 
 def api_key_identity(token_data: dict[str, Any] | None) -> tuple[str | None, str | None]:
-    if not isinstance(token_data, dict) or token_data.get("role") == "admin":
+    if not isinstance(token_data, dict) or token_data.get("role") in {"admin", "debug"}:
         return None, None
     key_id = str(token_data.get("key_id") or "").strip() or None
     prefix = str(token_data.get("api_key") or "").strip() or None

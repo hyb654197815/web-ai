@@ -100,6 +100,23 @@ Index("idx_agent_token_usage_created_at", token_usage.c.created_at)
 Index("idx_agent_token_usage_api_key", token_usage.c.api_key_id)
 Index("idx_agent_token_usage_model", token_usage.c.model_id)
 
+session_messages = Table(
+    "agent_session_messages",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("session_id", String(120), nullable=False),
+    Column("api_key_id", String(64), nullable=True),
+    Column("api_key_prefix", String(32), nullable=True),
+    Column("pathname", String(300), nullable=True),
+    Column("endpoint", String(240), nullable=False),
+    Column("role", String(40), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+Index("idx_agent_session_messages_session_id", session_messages.c.session_id)
+Index("idx_agent_session_messages_created_at", session_messages.c.created_at)
+
 _ENGINE: Engine | None = None
 _INIT_LOCK = threading.Lock()
 
@@ -318,3 +335,109 @@ def query_token_usage(*, since: datetime, api_key_id: str | None = None, limit: 
             item["created_at"] = created_at.isoformat()
         records.append(item)
     return {"summary": summary, "total": int(total_rows or 0), "records": records}
+
+
+def record_session_message(record: dict[str, Any]) -> None:
+    engine = get_engine()
+    payload = {
+        "session_id": str(record.get("session_id") or "").strip(),
+        "api_key_id": str(record.get("api_key_id") or "") or None,
+        "api_key_prefix": str(record.get("api_key_prefix") or "") or None,
+        "pathname": str(record.get("pathname") or "")[:300] or None,
+        "endpoint": str(record.get("endpoint") or ""),
+        "role": str(record.get("role") or "assistant")[:40] or "assistant",
+        "content": str(record.get("content") or ""),
+        "created_at": record.get("created_at") if isinstance(record.get("created_at"), datetime) else _now(),
+    }
+    if not payload["session_id"] or not payload["content"]:
+        return
+    with engine.begin() as conn:
+        conn.execute(insert(session_messages).values(**payload))
+
+
+def query_session_messages(
+    *,
+    session_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    engine = get_engine()
+    filters = []
+    normalized_session_id = str(session_id or "").strip()
+    if normalized_session_id:
+        filters.append(session_messages.c.session_id == normalized_session_id)
+
+    with engine.begin() as conn:
+        total_rows = conn.execute(
+            select(func.count()).select_from(session_messages).where(*filters)
+        ).scalar_one()
+        rows = conn.execute(
+            select(session_messages)
+            .where(*filters)
+            .order_by(session_messages.c.created_at.desc(), session_messages.c.id.desc())
+            .limit(max(1, min(500, limit)))
+            .offset(max(0, offset))
+        ).all()
+
+    records = []
+    for row in rows:
+        item = dict(row._mapping)
+        created_at = item.get("created_at")
+        if isinstance(created_at, datetime):
+            item["created_at"] = created_at.isoformat()
+        records.append(item)
+    return {"total": int(total_rows or 0), "records": records}
+
+
+def query_session_overview(*, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    engine = get_engine()
+    summary_sql = (
+        select(
+            session_messages.c.session_id.label("session_id"),
+            func.count().label("message_count"),
+            func.max(session_messages.c.created_at).label("last_message_at"),
+        )
+        .group_by(session_messages.c.session_id)
+        .order_by(func.max(session_messages.c.created_at).desc())
+        .limit(max(1, min(500, limit)))
+        .offset(max(0, offset))
+    )
+
+    with engine.begin() as conn:
+        total_rows = conn.execute(
+            select(func.count(func.distinct(session_messages.c.session_id)))
+        ).scalar_one()
+        overview_rows = conn.execute(summary_sql).all()
+
+    session_ids = [str(row._mapping["session_id"]) for row in overview_rows]
+    latest_records: dict[str, dict[str, Any]] = {}
+
+    if session_ids:
+        with engine.begin() as conn:
+            detail_rows = conn.execute(
+                select(session_messages)
+                .where(session_messages.c.session_id.in_(session_ids))
+                .order_by(session_messages.c.created_at.desc(), session_messages.c.id.desc())
+            ).all()
+        for row in detail_rows:
+            item = dict(row._mapping)
+            session_key = str(item.get("session_id") or "")
+            if session_key not in latest_records:
+                latest_records[session_key] = item
+
+    records = []
+    for row in overview_rows:
+        item = dict(row._mapping)
+        session_key = str(item.get("session_id") or "")
+        latest = latest_records.get(session_key, {})
+        last_message_at = item.get("last_message_at")
+        if isinstance(last_message_at, datetime):
+            item["last_message_at"] = last_message_at.isoformat()
+        item["pathname"] = latest.get("pathname")
+        item["endpoint"] = latest.get("endpoint")
+        item["api_key_id"] = latest.get("api_key_id")
+        item["api_key_prefix"] = latest.get("api_key_prefix")
+        item["last_role"] = latest.get("role")
+        item["last_content"] = latest.get("content")
+        records.append(item)
+    return {"total": int(total_rows or 0), "records": records}

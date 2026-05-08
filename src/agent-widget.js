@@ -68,6 +68,10 @@ function isManagedApiKeyAuthEnabled() {
   return config.selfAuth !== false;
 }
 
+function isAgentAuthOptional() {
+  return config.selfAuth === false && typeof config.getToken !== 'function';
+}
+
 function createEmptyAuthState() {
   return {
     accessToken: '',
@@ -609,6 +613,10 @@ function normalizeProvidedTokenResult(value) {
 }
 
 async function getExternalAccessToken() {
+  if (isAgentAuthOptional()) {
+    applyAuthState();
+    return '';
+  }
   if (typeof config.getToken !== 'function') {
     throw new Error('selfAuth=false 时必须提供 getToken() 函数');
   }
@@ -1374,7 +1382,7 @@ async function fetchWithAgentAuth(input, init = {}) {
   };
 
   const usingExplicitAuthorization = headers.has('Authorization');
-  if (!usingExplicitAuthorization && !isManagedApiKeyAuthEnabled() && typeof config.getToken !== 'function') {
+  if (!usingExplicitAuthorization && !isManagedApiKeyAuthEnabled() && typeof config.getToken !== 'function' && !isAgentAuthOptional()) {
     throw new Error('selfAuth=false 时必须提供 getToken() 函数');
   }
   const shouldAttachAgentToken =

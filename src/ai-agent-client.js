@@ -16,6 +16,7 @@ class AIAgentClient {
     this.refreshToken = null;
     this.tokenExpiresAt = null;
     this.refreshTimer = null;
+    this.authDisabled = false;
 
     // 从 localStorage 恢复 Token
     this.loadTokensFromStorage();
@@ -83,6 +84,13 @@ class AIAgentClient {
    * 获取新的 Token
    */
   async getToken() {
+    if (this.authDisabled) {
+      return {
+        access_token: '',
+        refresh_token: '',
+        expires_in: 0,
+      };
+    }
     const response = await fetch(`${this.baseURL}/api/auth/token`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -170,6 +178,7 @@ class AIAgentClient {
    * 确保有有效的 Token
    */
   async ensureToken() {
+    if (this.authDisabled) return;
     // 如果没有 Token 或即将过期（5分钟内），刷新
     if (!this.accessToken || !this.tokenExpiresAt ||
         Date.now() > this.tokenExpiresAt - (5 * 60 * 1000)) {
@@ -177,24 +186,41 @@ class AIAgentClient {
     }
   }
 
+  async detectAuthMode() {
+    try {
+      const response = await fetch(`${this.baseURL}/api/page-agent/config`);
+      if (!response.ok) return;
+      const data = await response.json().catch(() => ({}));
+      this.authDisabled = data?.authDisabled === true;
+      if (this.authDisabled) {
+        this.clearTokens();
+      }
+    } catch (error) {
+      console.warn('Failed to detect auth mode:', error);
+    }
+  }
+
   /**
    * 发送 API 请求
    */
   async request(endpoint, options = {}) {
+    await this.detectAuthMode();
     await this.ensureToken();
 
     const url = `${this.baseURL}${endpoint}`;
     const headers = {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${this.accessToken}`,
       ...options.headers
     };
+    if (!this.authDisabled && this.accessToken) {
+      headers.Authorization = `Bearer ${this.accessToken}`;
+    }
 
     try {
       const response = await fetch(url, { ...options, headers });
 
       // Token 过期，刷新后重试
-      if (response.status === 401) {
+      if (!this.authDisabled && response.status === 401) {
         await this.refreshAccessToken();
         headers.Authorization = `Bearer ${this.accessToken}`;
         return await fetch(url, { ...options, headers });
