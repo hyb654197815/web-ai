@@ -1,17 +1,20 @@
 # LangChain Agent backend REST API：与前端 Agent 对接
+import io
 import json
 import os
 import re
 import time
 import uuid
+import zipfile
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -1157,6 +1160,158 @@ async def admin_probe_mcp(
     if not server:
         raise HTTPException(status_code=422, detail="invalid MCP server config")
     return inspect_mcp_server(server)
+
+
+# ==================== Knowledge 文档管理 ====================
+
+_SAFE_FILENAME_RE = re.compile(r'^[\w\-. ]+$')
+
+
+def _safe_knowledge_path(filename: str) -> Path:
+    """解析并校验文件名，防止路径穿越，返回绝对路径。"""
+    name = str(filename or "").strip()
+    if not name or not _SAFE_FILENAME_RE.match(name) or ".." in name:
+        raise HTTPException(status_code=400, detail="invalid filename")
+    target = Path(REFERENCES_DIR) / name
+    # 确保最终路径仍在 REFERENCES_DIR 内
+    if not str(target.resolve()).startswith(str(Path(REFERENCES_DIR).resolve())):
+        raise HTTPException(status_code=400, detail="invalid filename")
+    return target
+
+
+@app.get("/api/admin/knowledge/files")
+def list_knowledge_files(_: dict = Depends(verify_admin_token)) -> list[dict]:
+    """列出 webAIDocs 目录下的所有文件"""
+    ensure_admin_backend_enabled()
+    base = Path(REFERENCES_DIR)
+    if not base.exists():
+        return []
+    result = []
+    for p in sorted(base.iterdir()):
+        if p.is_file():
+            stat = p.stat()
+            result.append({
+                "name": p.name,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+            })
+    return result
+
+
+@app.get("/api/admin/knowledge/files/{filename}")
+def get_knowledge_file(filename: str, _: dict = Depends(verify_admin_token)) -> dict:
+    """读取单个文件内容"""
+    ensure_admin_backend_enabled()
+    target = _safe_knowledge_path(filename)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+    try:
+        content = target.read_text(encoding="utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"read error: {exc}") from exc
+    return {"name": filename, "content": content}
+
+
+class KnowledgeFileSaveRequest(BaseModel):
+    content: str = Field(default="")
+
+
+@app.put("/api/admin/knowledge/files/{filename}")
+def save_knowledge_file(
+    filename: str,
+    body: KnowledgeFileSaveRequest,
+    _: dict = Depends(verify_admin_token),
+) -> dict:
+    """保存（覆盖）单个文件内容"""
+    ensure_admin_backend_enabled()
+    target = _safe_knowledge_path(filename)
+    Path(REFERENCES_DIR).mkdir(parents=True, exist_ok=True)
+    try:
+        target.write_text(body.content, encoding="utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"write error: {exc}") from exc
+    return {"name": filename, "size": target.stat().st_size}
+
+
+class KnowledgeRenameRequest(BaseModel):
+    new_name: str
+
+
+@app.post("/api/admin/knowledge/files/{filename}/rename")
+def rename_knowledge_file(
+    filename: str,
+    body: KnowledgeRenameRequest,
+    _: dict = Depends(verify_admin_token),
+) -> dict:
+    """重命名文件"""
+    ensure_admin_backend_enabled()
+    src = _safe_knowledge_path(filename)
+    dst = _safe_knowledge_path(body.new_name)
+    if not src.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+    if dst.exists():
+        raise HTTPException(status_code=409, detail="target filename already exists")
+    src.rename(dst)
+    return {"name": body.new_name}
+
+
+@app.delete("/api/admin/knowledge/files/{filename}")
+def delete_knowledge_file(filename: str, _: dict = Depends(verify_admin_token)) -> dict:
+    """删除单个文件"""
+    ensure_admin_backend_enabled()
+    target = _safe_knowledge_path(filename)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+    target.unlink()
+    return {"deleted": filename}
+
+
+@app.post("/api/admin/knowledge/upload")
+async def upload_knowledge_file(
+    file: UploadFile = File(...),
+    _: dict = Depends(verify_admin_token),
+) -> dict:
+    """上传单个文件（覆盖同名文件）"""
+    ensure_admin_backend_enabled()
+    name = str(file.filename or "").strip()
+    target = _safe_knowledge_path(name)
+    Path(REFERENCES_DIR).mkdir(parents=True, exist_ok=True)
+    content = await file.read()
+    try:
+        target.write_bytes(content)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"write error: {exc}") from exc
+    return {"name": name, "size": len(content)}
+
+
+@app.post("/api/admin/knowledge/upload-zip")
+async def upload_knowledge_zip(
+    file: UploadFile = File(...),
+    _: dict = Depends(verify_admin_token),
+) -> dict:
+    """上传 zip 压缩包，解压后批量覆盖 webAIDocs 目录中的文件（只写入文件，不删除已有文件）"""
+    ensure_admin_backend_enabled()
+    base = Path(REFERENCES_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+    raw = await file.read()
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            written = []
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                # 只取文件名，忽略 zip 内的目录层级
+                name = Path(info.filename).name
+                if not name or not _SAFE_FILENAME_RE.match(name):
+                    continue
+                target = base / name
+                target.write_bytes(zf.read(info.filename))
+                written.append(name)
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=400, detail="invalid zip file") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"extract error: {exc}") from exc
+    return {"written": written, "count": len(written)}
 
 
 def _normalize_path_candidate(value: str | None) -> str:

@@ -202,6 +202,9 @@ export const AIAgentAdmin = {
   requiresPasswordSetup: false,
   bootstrapUsername: 'admin',
   authBootstrapLoading: false,
+  knowledgeFiles: [],
+  knowledgeEditor: null, // { name, content, isNew }
+  knowledgeUploadStatus: '',
 
   open(options = {}) {
     if (typeof document === 'undefined') return this;
@@ -824,6 +827,7 @@ export const AIAgentAdmin = {
       }
       if (id === 'sessions') this.loadSessions();
       if (id === 'logs') this.loadLogs();
+      if (id === 'knowledge') this.loadKnowledgeFiles();
       this.render();
     }
     if (action === 'login') this.handleLogin();
@@ -866,6 +870,15 @@ export const AIAgentAdmin = {
     if (action === 'view-session') this.openSessionDetail(id);
     if (action === 'close-session-detail') this.closeSessionDetail();
     if (action === 'refresh-logs') this.loadLogs();
+    if (action === 'refresh-knowledge') this.loadKnowledgeFiles();
+    if (action === 'knowledge-new-file') this.knowledgeNewFile();
+    if (action === 'knowledge-edit') this.knowledgeOpenEditor(id);
+    if (action === 'knowledge-delete') this.knowledgeDeleteFile(id);
+    if (action === 'knowledge-rename') this.knowledgeRenameFile(id);
+    if (action === 'knowledge-save') this.knowledgeSaveFile();
+    if (action === 'knowledge-cancel') this.knowledgeCloseEditor();
+    if (action === 'knowledge-upload') this.knowledgeTriggerUpload(false);
+    if (action === 'knowledge-upload-zip') this.knowledgeTriggerUpload(true);
   },
 
   handleInput(event) {
@@ -874,6 +887,14 @@ export const AIAgentAdmin = {
     const role = target.getAttribute('data-role');
     if (role === 'mcp-json-input' && this.mcpFormEditor) {
       this.mcpFormEditor.value = target.value;
+      return;
+    }
+    if (role === 'knowledge-content' && this.knowledgeEditor) {
+      this.knowledgeEditor.content = target.value;
+      return;
+    }
+    if (role === 'knowledge-filename' && this.knowledgeEditor) {
+      this.knowledgeEditor.name = target.value;
       return;
     }
     const bind = target.getAttribute('data-bind');
@@ -2126,6 +2147,46 @@ export const AIAgentAdmin = {
           min-width: 860px;
         }
       }
+      .knowledge-editor-wrap {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        height: calc(100vh - 160px);
+      }
+      .knowledge-editor-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .knowledge-name-input {
+        margin-top: 8px;
+        width: 320px;
+        padding: 6px 10px;
+        background: #1a1a1a;
+        border: 1px solid #333;
+        border-radius: 6px;
+        color: #e8e8e8;
+        font-size: 13px;
+      }
+      .knowledge-textarea {
+        flex: 1;
+        width: 100%;
+        padding: 14px;
+        background: #141414;
+        border: 1px solid #2b2b2b;
+        border-radius: 8px;
+        color: #e8e8e8;
+        font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.7;
+        resize: none;
+        box-sizing: border-box;
+      }
+      .knowledge-textarea:focus {
+        outline: none;
+        border-color: #444;
+      }
     `;
   },
 
@@ -2165,6 +2226,9 @@ export const AIAgentAdmin = {
       case 'logs':
         contentHTML = this.renderLogsView();
         break;
+      case 'knowledge':
+        contentHTML = this.renderKnowledgeView();
+        break;
       default:
         contentHTML = this.renderModels();
     }
@@ -2193,6 +2257,7 @@ export const AIAgentAdmin = {
       ['billing', '$', 'Usage'],
       ['sessions', '@', 'Sessions'],
       ['logs', 'L', 'Logs'],
+      ['knowledge', '📄', 'Knowledge'],
     ];
     return `
       <aside class="sidebar">
@@ -2255,6 +2320,11 @@ export const AIAgentAdmin = {
         title: '日志查看',
         subtitle: '查看请求日志和安全事件日志。',
         showSave: false
+      },
+      knowledge: {
+        title: 'Knowledge',
+        subtitle: '管理 webAIDocs 知识库文档，支持在线编辑、上传和删除。',
+        showSave: false
       }
     };
 
@@ -2270,6 +2340,11 @@ export const AIAgentAdmin = {
           ${config.showSave ? `
             <button class="btn" data-action="refresh" type="button">刷新</button>
             <button class="btn primary" data-action="save" type="button">保存</button>
+          ` : this.activeView === 'knowledge' ? `
+            <button class="btn" data-action="refresh-knowledge" type="button">刷新</button>
+            <button class="btn" data-action="knowledge-upload" type="button">上传文件</button>
+            <button class="btn" data-action="knowledge-upload-zip" type="button">上传 ZIP</button>
+            <button class="btn primary" data-action="knowledge-new-file" type="button">新建文件</button>
           ` : `
             <button class="btn" data-action="refresh-${this.activeView}" type="button">刷新</button>
           `}
@@ -2901,6 +2976,210 @@ export const AIAgentAdmin = {
           <span class="log-status status-${Math.floor((log.status || 0) / 100)}">${log.status || ''}</span>
           ${log.api_key ? `<span class="log-key">${escapeHTML(log.api_key)}</span>` : ''}
         </div>
+      </div>
+    `;
+  },
+
+  // ==================== Knowledge ====================
+
+  async loadKnowledgeFiles() {
+    this.setBusy(true);
+    try {
+      const data = await this.request('/admin/knowledge/files');
+      this.knowledgeFiles = Array.isArray(data) ? data : [];
+    } catch (error) {
+      this.toast(`加载文件列表失败：${error.message}`);
+      this.knowledgeFiles = [];
+    } finally {
+      this.setBusy(false);
+      this.render();
+    }
+  },
+
+  knowledgeNewFile() {
+    const name = `new-file-${Date.now()}.md`;
+    this.knowledgeEditor = { name, content: '', isNew: true };
+    this.render();
+  },
+
+  async knowledgeOpenEditor(filename) {
+    this.setBusy(true);
+    try {
+      const data = await this.request(`/admin/knowledge/files/${encodeURIComponent(filename)}`);
+      this.knowledgeEditor = { name: data.name, content: data.content, isNew: false };
+    } catch (error) {
+      this.toast(`读取文件失败：${error.message}`);
+    } finally {
+      this.setBusy(false);
+      this.render();
+    }
+  },
+
+  knowledgeCloseEditor() {
+    this.knowledgeEditor = null;
+    this.render();
+  },
+
+  async knowledgeSaveFile() {
+    if (!this.knowledgeEditor) return;
+    const { name, content } = this.knowledgeEditor;
+    this.setBusy(true);
+    try {
+      await this.request(`/admin/knowledge/files/${encodeURIComponent(name)}`, {
+        method: 'PUT',
+        body: JSON.stringify({ content }),
+      });
+      this.toast(`已保存：${name}`);
+      this.knowledgeEditor = null;
+      await this.loadKnowledgeFiles();
+    } catch (error) {
+      this.toast(`保存失败：${error.message}`);
+      this.setBusy(false);
+      this.render();
+    }
+  },
+
+  async knowledgeDeleteFile(filename) {
+    if (!globalObject.confirm(`确认删除文件 "${filename}"？`)) return;
+    this.setBusy(true);
+    try {
+      await this.request(`/admin/knowledge/files/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+      this.toast(`已删除：${filename}`);
+      await this.loadKnowledgeFiles();
+    } catch (error) {
+      this.toast(`删除失败：${error.message}`);
+      this.setBusy(false);
+      this.render();
+    }
+  },
+
+  async knowledgeRenameFile(filename) {
+    const newName = globalObject.prompt('请输入新文件名：', filename);
+    if (!newName || newName === filename) return;
+    this.setBusy(true);
+    try {
+      await this.request(`/admin/knowledge/files/${encodeURIComponent(filename)}/rename`, {
+        method: 'POST',
+        body: JSON.stringify({ new_name: newName }),
+      });
+      this.toast(`已重命名为：${newName}`);
+      await this.loadKnowledgeFiles();
+    } catch (error) {
+      this.toast(`重命名失败：${error.message}`);
+      this.setBusy(false);
+      this.render();
+    }
+  },
+
+  knowledgeTriggerUpload(isZip) {
+    const input = globalObject.document?.createElement('input');
+    if (!input) return;
+    input.type = 'file';
+    input.accept = isZip ? '.zip' : '*';
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      this.setBusy(true);
+      this.knowledgeUploadStatus = `正在上传 ${file.name}...`;
+      this.render();
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const endpoint = isZip ? '/admin/knowledge/upload-zip' : '/admin/knowledge/upload';
+        const url = `${trimSlash(this.backendUrl)}${endpoint}`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${this.accessToken}` },
+          body: formData,
+        });
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.detail || `HTTP ${response.status}`);
+        }
+        const result = await response.json();
+        if (isZip) {
+          this.toast(`ZIP 解压完成，写入 ${result.count} 个文件`);
+        } else {
+          this.toast(`上传成功：${result.name}`);
+        }
+        await this.loadKnowledgeFiles();
+      } catch (error) {
+        this.toast(`上传失败：${error.message}`);
+        this.setBusy(false);
+        this.render();
+      } finally {
+        this.knowledgeUploadStatus = '';
+      }
+    };
+    input.click();
+  },
+
+  renderKnowledgeView() {
+    if (this.knowledgeEditor) {
+      return this.renderKnowledgeEditor();
+    }
+    const files = this.knowledgeFiles;
+    const statusMsg = this.knowledgeUploadStatus
+      ? `<div class="section-label">${escapeHTML(this.knowledgeUploadStatus)}</div>`
+      : '';
+    if (!files.length) {
+      return `
+        ${statusMsg}
+        <div class="empty-state">
+          <p>webAIDocs 目录下暂无文件，点击右上角按钮上传或新建。</p>
+        </div>
+      `;
+    }
+    return `
+      ${statusMsg}
+      <section class="settings-card">
+        ${files.map((f) => this.renderKnowledgeFileRow(f)).join('')}
+      </section>
+    `;
+  },
+
+  renderKnowledgeFileRow(file) {
+    const size = file.size >= 1024
+      ? `${(file.size / 1024).toFixed(1)} KB`
+      : `${file.size} B`;
+    const modified = file.modified
+      ? new Date(file.modified * 1000).toLocaleString('zh-CN')
+      : '--';
+    return `
+      <div class="mcp-row">
+        <div class="server-mark" style="font-size:16px">📄</div>
+        <div>
+          <div class="row-title">${escapeHTML(file.name)}</div>
+          <div class="status-line">
+            <span>${escapeHTML(size)}</span>
+            <span>${escapeHTML(modified)}</span>
+          </div>
+        </div>
+        <div class="inline-actions">
+          <button class="link-btn" data-action="knowledge-edit" data-id="${escapeHTML(file.name)}" type="button">编辑</button>
+          <button class="link-btn" data-action="knowledge-rename" data-id="${escapeHTML(file.name)}" type="button">重命名</button>
+          <button class="link-btn" data-action="knowledge-delete" data-id="${escapeHTML(file.name)}" type="button">删除</button>
+        </div>
+      </div>
+    `;
+  },
+
+  renderKnowledgeEditor() {
+    const editor = this.knowledgeEditor;
+    const title = editor.isNew ? '新建文件' : `编辑：${editor.name}`;
+    return `
+      <div class="knowledge-editor-wrap">
+        <div class="knowledge-editor-header">
+          <div>
+            <div class="json-dialog-title">${escapeHTML(title)}</div>
+            ${editor.isNew ? `<input class="knowledge-name-input" type="text" data-role="knowledge-filename" value="${escapeHTML(editor.name)}" placeholder="文件名（如 page-home.md）" />` : ''}
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn" data-action="knowledge-cancel" type="button">取消</button>
+            <button class="btn primary" data-action="knowledge-save" type="button">保存</button>
+          </div>
+        </div>
+        <textarea class="knowledge-textarea" data-role="knowledge-content" spellcheck="false">${escapeHTML(editor.content)}</textarea>
       </div>
     `;
   },
