@@ -4,109 +4,121 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-43853d)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-在线文档与演示：<https://hyb654197815.github.io/web-ai/>
+[简体中文](./README.zh-CN.md)
 
-一个面向后台、中台、运营系统的页面级 AI Agent 方案。
+Docs and demo: <https://hyb654197815.github.io/web-ai/>
 
-它把这件事拆成三层：
+`portable-ai-agent-widget` is a page-level AI agent stack for business frontends.
 
-- 前端 Widget：负责承接对话、接收受控动作
-- FastAPI 后端：负责鉴权、知识检索、模型决策、MCP 管理
-- `webGenerate` 工作流：负责生成 `webAIDocs/routes.md` 和 `page-xxx.md`
+It is built around one shared document contract: `webAIDocs/`.
 
-适合“页面结构清晰、业务流程固定、希望 AI 能回答页面问题并辅助操作”的 Web 应用。
+Those documents serve two jobs:
 
-## 核心能力
+1. They help coding agents understand routes, forms, and page behavior before they modify frontend code.
+2. They can be uploaded into the runtime admin so the frontend AI agent can answer business questions and act on the page faster.
 
-- 页面问答：基于当前路由和页面知识文档回答业务问题
-- 受控导航：返回 `navigate` 动作，由前端路由执行
-- 当前页操作：返回 `form` 动作，用于表单、筛选、按钮、分页等页面交互
-- 知识文档复用：统一读取 `webAIDocs/`，可同时服务 Widget、Agent、IDE 工作流
+## What This Project Does
 
-## 安全边界
+This project combines three parts:
 
-- 前端只执行白名单动作，不执行任意脚本
-- 不依赖 DOM 注入，不把模型工具能力直接暴露给浏览器
-- 生产环境推荐 `selfAuth=false`，由你自己的服务下发短期 token
+- `webGenerate`: installs a workflow into coding assistants so they can generate `webAIDocs/routes.md` and `page-xxx.md`
+- FastAPI backend: handles auth, model routing, MCP, billing, sessions, and hosted knowledge docs
+- frontend widget: plugs into your web app for knowledge Q&A, controlled navigation, and current-page actions
 
-## 为什么这个项目适合做开源接入层
+If your product has admin pages, dashboards, operations systems, or other route-driven business pages, this project gives you a practical way to turn page structure into reusable agent knowledge.
 
-- 接入简单：前端只需要初始化一个 `AIAgent`
-- 能力可控：前端动作协议固定，不把“任意自动化”带进线上页面
-- 知识可维护：页面知识落在 `webAIDocs/`，可随业务演进持续更新
-- 架构清晰：前端、后端、知识文档工作流职责分离
+## Two Core Capabilities
 
-## 标准流程
+### 1. Improve coding agents with business docs
 
-高质量问答依赖高质量 `webAIDocs/`。如果没有先生成并放回仓库，后端虽然能启动，但 Agent 的页面理解和业务回答质量会明显下降。
+`webGenerate` turns a real frontend project into business-facing docs:
 
-推荐按下面顺序接入：
+- `routes.md` gives an index of pages and route mapping
+- `page-xxx.md` describes page purpose, fields, buttons, flows, and operational notes
 
-1. 用 `webGenerate` 给你的编程助手安装工作流
-2. 在业务项目里运行 `webGenerate` 生成 `webAIDocs/routes.md` 和 `page-xxx.md`
-3. 把生成好的 `webAIDocs/` 复制回当前仓库，供后端 Agent 读取
-4. 启动后端，配置管理员、API Key、模型和 MCP
-5. 在前端项目中接入 Widget
+Once those files exist, coding assistants can read them first and then change code with much better business context.
 
-## 快速开始
+### 2. Reuse the same docs for fast frontend-agent onboarding
 
-### 依赖要求
+The generated docs are not only for IDE workflows.
+
+You can compress the whole `webAIDocs/` folder as a ZIP, upload it in the admin console, configure a model, and immediately give the runtime agent a business knowledge base without building a custom retrieval pipeline first.
+
+## Workflow In One View
+
+1. Install the `webGenerate` workflow into the coding assistant your team uses.
+2. Run the assistant command inside the real frontend business repo.
+3. Generate `webAIDocs/routes.md` and `page-xxx.md`.
+4. Compress the generated `webAIDocs/` folder into a ZIP file.
+5. Start the backend and open the admin console.
+6. Configure at least one model.
+7. Upload the ZIP in `Knowledge`.
+8. Create an API key for local widget integration.
+9. Install the frontend package and initialize the widget.
+
+This is the recommended quick start because it avoids raw REST setup at the beginning. You can get value first through the assistant workflow, admin UI, and widget integration.
+
+## Quick Start
+
+### Requirements
 
 - Node.js `>= 18`
-- Python `3.11+` 推荐
+- Python `3.11+` recommended for the backend
 
-### 1. 安装 `webGenerate` 工作流
+### 1. Install `webGenerate` into your coding assistant
 
-例如为 Codex 安装：
+Use one of the supported platform commands below from any terminal.
 
-```bash
-npx portable-ai-agent-widget codex install
-```
+| Assistant | Install command | Trigger in chat | Incremental sync | Uninstall |
+| --- | --- | --- | --- | --- |
+| Codex | `npx portable-ai-agent-widget codex install` | `$webGenerate .` | `$webGenerate . --update` | `npx portable-ai-agent-widget codex uninstall` |
+| Claude Code | `npx portable-ai-agent-widget claude install` | `/webGenerate .` | `/webGenerate . --update` | `npx portable-ai-agent-widget claude uninstall` |
+| OpenCode | `npx portable-ai-agent-widget opencode install` | `/webGenerate .` | `/webGenerate . --update` | `npx portable-ai-agent-widget opencode uninstall` |
+| GitHub Copilot CLI | `npx portable-ai-agent-widget copilot-cli install` | Ask Copilot to run `/webGenerate .` | Ask Copilot to run `/webGenerate . --update` | `npx portable-ai-agent-widget copilot-cli uninstall` |
+| VS Code Copilot Chat | `npx portable-ai-agent-widget vscode-copilot install` | Ask Copilot to run `/webGenerate .` | Ask Copilot to run `/webGenerate . --update` | `npx portable-ai-agent-widget vscode-copilot uninstall` |
+| Gemini CLI | `npx portable-ai-agent-widget gemini install` | `/webGenerate .` | `/webGenerate . --update` | `npx portable-ai-agent-widget gemini uninstall` |
+| Cursor | `npx portable-ai-agent-widget cursor install` | Ask Cursor Agent to run `/webGenerate .` | Ask Cursor Agent to run `/webGenerate . --update` | `npx portable-ai-agent-widget cursor uninstall` |
+| Trae | `npx portable-ai-agent-widget trae install` | `/webGenerate .` | `/webGenerate . --update` | `npx portable-ai-agent-widget trae uninstall` |
+| Trae CN | `npx portable-ai-agent-widget trae-cn install` | `/webGenerate .` | `/webGenerate . --update` | `npx portable-ai-agent-widget trae-cn uninstall` |
+| Antigravity | `npx portable-ai-agent-widget antigravity install` | `/webGenerate .` | `/webGenerate . --update` | `npx portable-ai-agent-widget antigravity uninstall` |
 
-也可以安装到其他助手：
+CLI parameter notes:
 
-```bash
-npx portable-ai-agent-widget claude install
-npx portable-ai-agent-widget cursor install
-npx portable-ai-agent-widget gemini install
-```
+- `<platform>` can be `claude`, `codex`, `opencode`, `copilot-cli`, `vscode-copilot`, `gemini`, `antigravity`, `cursor`, `trae`, or `trae-cn`
+- action is `install` or `uninstall`
+- alternative form is also supported: `webGenerate install --platform codex`
 
-### 2. 生成 `webAIDocs/`
+Assistant trigger parameter notes:
 
-安装完成后，在你的业务项目中触发：
+- `[path]` is the project root to scan; use `.` in most cases
+- `--update` means incremental sync after code changes
+- if `routes.md` is missing or too broken, the workflow falls back from incremental mode to a full regeneration
 
-- Codex：`$webGenerate .`
-- Claude / Cursor / Gemini / Trae / Copilot 等：`/webGenerate .`
+### 2. Generate docs inside the real business frontend repo
 
-增量同步：
+Go to your actual frontend product repo and run the assistant trigger there, not in this widget repo.
 
-- Codex：`$webGenerate . --update`
-- 其他助手：`/webGenerate . --update`
-
-固定输出：
-
-- `webAIDocs/routes.md`
-- `webAIDocs/page-xxx.md`
-
-### 3. 把文档复制回当前仓库
-
-这是影响问答质量的关键步骤。后端默认会从当前项目根目录读取 `webAIDocs/`，所以生成完成后，需要把业务项目里的文档复制回本仓库：
+Expected output:
 
 ```text
-your-business-project/
-└─ webAIDocs/
-   ├─ routes.md
-   └─ page-xxx.md
-
-copy to
-
-portable-ai-agent-widget/
-└─ webAIDocs/
+webAIDocs/
+  routes.md
+  page-xxx.md
+  page-yyy.md
 ```
 
-可以理解为：`webGenerate` 负责在业务项目里“产出知识”，当前仓库里的后端负责“消费知识”。
+What these files do:
 
-### 4. 启动后端
+- `routes.md`: route index for the whole system
+- `page-xxx.md`: page-level business knowledge for forms, actions, steps, and notes
+
+### 3. Compress `webAIDocs/` as a ZIP
+
+Create a ZIP from the entire `webAIDocs/` folder, not only from `routes.md`.
+
+That ZIP is the fastest way to move business knowledge from the frontend repo into the runtime admin.
+
+### 4. Start the backend
 
 ```bash
 cd backend
@@ -119,60 +131,53 @@ cp .env.example .env
 Copy-Item .env.example .env
 ```
 
-至少修改这些配置：
+At minimum, set:
 
 ```env
 ADMIN_PASSWORD=your-strong-password
 JWT_SECRET_KEY=your-long-random-secret
 ACCESS_TOKEN_EXPIRE_MINUTES=15
 ENABLE_ADMIN_BACKEND=true
-DISABLE_AGENT_AUTH=false
-# 默认使用 SQLite：data/agent.sqlite3；可选配置 MySQL/PostgreSQL
-# AGENT_DATABASE_URL=postgresql+psycopg://user:password@127.0.0.1:5432/web_ai
 ```
 
-然后启动服务：
+Then start the service:
 
 ```bash
 python main.py
 ```
 
-默认地址：
+Default URLs:
 
-- 服务地址：`http://localhost:4096`
-- 管理后台：`http://localhost:4096/admin`
+- backend: `http://localhost:4096`
+- admin console: `http://localhost:4096/admin`
 
-说明：
+### 5. Configure the runtime in the admin console
 
-- `ADMIN_USERNAME` 默认是 `admin`
-- 如果 `ADMIN_PASSWORD` 仍是示例默认值，管理后台会拒绝登录
+Open the admin console and do this order first:
 
-### 5. 创建 API Key，并配置模型 / MCP
+1. Sign in with the admin account
+2. Open `Models` and configure at least one working model
+3. Open `Knowledge` and upload the `webAIDocs` ZIP
+4. Open `API Keys` and create a key for local development
+5. Optionally configure `Tools & MCP`
 
-登录 `http://localhost:4096/admin` 后：
+Why this order matters:
 
-1. 打开 `API Keys`
-2. 创建一个新的 Key
-3. 保存生成结果
-4. 根据需要在 `Models`、`Tools & MCP` 中配置模型和工具
-5. 如需 token 计费，在模型里填写 `input_price`、`output_price`、`cache_write_price`、`cache_read_price`
-6. 打开 `Usage` 查看请求数、token、消费、平均耗时和调用明细
+- no model means the runtime agent cannot answer
+- no uploaded docs means the runtime agent only has weak business context
+- ZIP upload is safer than copying files one by one in multi-repo setups
 
-说明：
+The admin knowledge module supports ZIP upload, single-file upload, online editing, rename, and delete.
 
-- 如果没有配置可用模型，Agent 无法正常回答
-- 如果业务依赖 MCP 工具，也应该在这一步一起配置
-- 价格单位是 USD / 1M tokens；数据库 DSL 见 `backend/SQL_DSL.md`
+### 6. Integrate the frontend widget
 
-### 6. 安装前端包
+Install the package:
 
 ```bash
 npm install portable-ai-agent-widget
 ```
 
-### 7. 先用开发模式跑通
-
-`selfAuth=true` 适合本地联调，接入路径最短：
+For the fastest local integration, initialize the widget with the API key you created in the admin console:
 
 ```js
 import AIAgent from "portable-ai-agent-widget";
@@ -183,11 +188,11 @@ AIAgent.init({
   selfAuth: true,
   routerPush: (route) => router.push(route),
 });
-
-await AIAgent.sendMessage("带我去用户管理");
 ```
 
-如果你不走打包器，也可以直接用 IIFE：
+This quick start is intentionally widget-first. You do not need to start with direct REST calls.
+
+If you prefer a no-bundler embed, use the IIFE build:
 
 ```html
 <script
@@ -200,15 +205,9 @@ await AIAgent.sendMessage("带我去用户管理");
 ></script>
 ```
 
-## 生产环境推荐接法
+## Production Recommendation
 
-生产环境建议使用 `selfAuth=false`，不要把 `apiKey` 下发到前端。
-
-如果只是本地调试，也可以直接在后端环境变量里设置 `DISABLE_AGENT_AUTH=true`。开启后：
-
-- 前端 Agent 可不传 `apiKey`
-- 不再要求 token 鉴权
-- 适合联调与页面操作调试，不建议用于生产环境
+For production, switch to `selfAuth=false` and return short-lived tokens from your own backend instead of exposing the long-lived API key to the browser.
 
 ```js
 import AIAgent from "portable-ai-agent-widget";
@@ -223,7 +222,7 @@ AIAgent.init({
     });
 
     if (!response.ok) {
-      throw new Error("获取 Agent token 失败");
+      throw new Error("Failed to fetch agent token");
     }
 
     const data = await response.json();
@@ -236,93 +235,52 @@ AIAgent.init({
 });
 ```
 
-这个模式的好处：
+## CLI Reference
 
-- 前端不再持有长期 `apiKey`
-- token 过期后，Widget 会自动重新获取
-- 你可以把登录态、权限校验、限流策略留在自己的服务里
-
-完整的鉴权说明和服务端示例见：
-
-- [backend/AUTH_GUIDE.md](./backend/AUTH_GUIDE.md)
-- [QUICK_START.md](./QUICK_START.md)
-
-## `webGenerate` 工作流
-
-`webGenerate` 不直接在 npm 命令里扫描业务页面，而是先把工作流安装到你的助手里，再通过助手命令生成 `webAIDocs/`。
-
-### 安装工作流
-
-例如为 Codex 安装：
+Install or uninstall assistant workflows:
 
 ```bash
-npx portable-ai-agent-widget codex install
+webGenerate <platform> install
+webGenerate <platform> uninstall
+webGenerate install --platform <platform>
 ```
 
-也可以安装到其他助手：
+Run the built-in MCP server against a doc set:
 
 ```bash
-npx portable-ai-agent-widget claude install
-npx portable-ai-agent-widget cursor install
-npx portable-ai-agent-widget gemini install
+webGenerate MCP
+webGenerate MCP --root ./your-project
 ```
 
-### 生成知识文档
+The built-in MCP exposes these tools:
 
-安装完成后，在业务项目中触发：
+- `list_routes`
+- `search_routes`
+- `get_page_doc`
+- `list_page_docs`
 
-- Codex：`$webGenerate .`
-- Claude / Cursor / Gemini / Trae / Copilot 等：`/webGenerate .`
+## Why The Same Docs Work For Both Agent Types
 
-增量同步：
+`webAIDocs/` is the bridge between development-time agents and runtime agents.
 
-- Codex：`$webGenerate . --update`
-- 其他助手：`/webGenerate . --update`
+- Coding agents use it as business context before refactoring or implementing frontend features.
+- Runtime agents use the hosted copy as the knowledge base behind page Q&A, route guidance, and current-page actions.
 
-固定输出：
+That means one documentation pass can improve both coding quality and user-facing agent behavior.
 
-- `webAIDocs/routes.md`
-- `webAIDocs/page-xxx.md`
-
-### 生成后要做什么
-
-生成完成后，请把业务项目中的 `webAIDocs/` 复制回当前仓库，再启动后端或重新生成 Agent 相关配置。
-
-这是因为当前仓库中的后端和本地 Agent 默认读取的是“当前项目根目录下的 `webAIDocs/`”，不是你业务项目中的那一份临时输出。
-
-## 常用接口
-
-- `POST /api/auth/token`
-- `POST /api/auth/refresh`
-- `POST /api/chat`
-- `POST /api/chat/stream`
-- `POST /api/session`
-- `POST /api/session/{sessionId}/message`
-- `GET /api/page-agent/config`
-- `POST /api/page-agent/chat/completions`
-
-鉴权特性：
-
-- Access token 默认有效期 15 分钟
-- Refresh token 默认有效期 7 天
-- Access / refresh token 都会持续回查绑定的 API Key 是否有效
-- 停用或删除 API Key 后，旧 token 会立即失效
-- 服务端按 API Key 的 `rate_limit` 执行限流
-
-## 仓库结构
+## Repo Structure
 
 ```text
 .
-├─ src/                     # 前端 Widget 源码
-├─ dist/                    # 前端构建产物（ESM + IIFE）
-├─ backend/                 # FastAPI 后端
-├─ scripts/webGenerate.js   # webGenerate CLI / MCP 入口
-├─ prompts/                 # 提示词
-├─ templates/               # 各平台 Skill 模板
-└─ webAIDocs/               # 页面知识文档
+├─ src/                     # frontend widget source
+├─ dist/                    # frontend build output
+├─ backend/                 # FastAPI backend
+├─ scripts/webGenerate.js   # CLI and built-in MCP entry
+├─ templates/               # assistant workflow templates
+└─ webAIDocs/               # business knowledge docs
 ```
 
-## 本地开发
+## Local Development
 
 ```bash
 npm install
@@ -330,7 +288,7 @@ npm run build
 npm run dev
 ```
 
-后端开发：
+Backend:
 
 ```bash
 cd backend
@@ -338,31 +296,16 @@ pip install -r requirements.txt
 python main.py
 ```
 
-## 命令速查
+## Related Docs
 
-```bash
-# 构建前端产物
-npm run build
-
-# 本地预览
-npm run dev
-
-# 同步 GitHub README 到 README.md
-npm run readme:github
-
-# 发布前切换 npm README
-npm run readme:npm
-```
-
-## 相关文档
-
+- [README.zh-CN.md](./README.zh-CN.md)
 - [QUICK_START.md](./QUICK_START.md)
 - [ARCHITECTURE.md](./ARCHITECTURE.md)
 - [PRINCIPLES.md](./PRINCIPLES.md)
 - [backend/README.md](./backend/README.md)
 - [backend/AUTH_GUIDE.md](./backend/AUTH_GUIDE.md)
 
-## 发布
+## Publish
 
 ```bash
 npm run build
@@ -370,4 +313,4 @@ npm pack --dry-run
 npm publish
 ```
 
-发布时会自动切换到 npm 版 README，打包结束后再恢复仓库版 README。
+The publish flow switches `README.md` to the npm version before packing, then restores the GitHub version afterward.

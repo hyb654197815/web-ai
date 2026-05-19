@@ -1,27 +1,81 @@
-# portable-ai-agent-widget
+# Portable AI Agent Widget
 
-给前端项目接入页面级 AI Agent 的工具包，包含两部分能力：
+[简体中文](https://github.com/hyb654197815/web-ai/blob/main/README.zh-CN.md)
 
-- 前端 Widget：页面问答、受控导航、当前页操作
-- `webGenerate` CLI：把知识文档工作流安装到 Codex、Claude、Cursor、Gemini 等助手里
+`portable-ai-agent-widget` helps teams use one generated document set in two places:
 
-在线文档与演示：<https://hyb654197815.github.io/web-ai/>
+1. Improve coding agents before they change frontend code.
+2. Onboard a runtime frontend agent quickly through admin upload and widget integration.
 
-如果你需要完整的后端接入、鉴权方案和项目架构，请看 GitHub 仓库主页。
+## What You Install From npm
 
-## 安装
+This package includes:
 
-```bash
-npm install portable-ai-agent-widget
-```
+- `webGenerate` CLI for assistant workflow installation
+- frontend widget package for runtime integration
 
-如果你只是想临时执行 `webGenerate`，也可以直接：
+The runtime backend lives in the GitHub repo and is part of the recommended setup flow.
+
+## Core Value
+
+Generate `webAIDocs/routes.md` and `page-xxx.md` in the real business frontend repo, then reuse those docs across the whole stack.
+
+- For coding agents: the docs explain routes, forms, flows, and business intent
+- For runtime agents: the same docs can be uploaded as a ZIP in the admin console and used immediately by the frontend AI agent
+
+## Quick Start
+
+### 1. Install the assistant workflow
 
 ```bash
 npx portable-ai-agent-widget codex install
 ```
 
-## 作为前端包使用
+Other supported platforms:
+
+```bash
+npx portable-ai-agent-widget claude install
+npx portable-ai-agent-widget opencode install
+npx portable-ai-agent-widget copilot-cli install
+npx portable-ai-agent-widget vscode-copilot install
+npx portable-ai-agent-widget gemini install
+npx portable-ai-agent-widget cursor install
+npx portable-ai-agent-widget trae install
+npx portable-ai-agent-widget trae-cn install
+npx portable-ai-agent-widget antigravity install
+```
+
+### 2. Generate docs in the business repo
+
+After installation, run the assistant trigger inside the real frontend project:
+
+- Codex: `$webGenerate .`
+- Most other assistants: `/webGenerate .`
+
+Incremental sync after page changes:
+
+- Codex: `$webGenerate . --update`
+- Most other assistants: `/webGenerate . --update`
+
+Output:
+
+```text
+webAIDocs/
+  routes.md
+  page-xxx.md
+```
+
+### 3. Upload docs to the runtime admin
+
+Compress the generated `webAIDocs/` folder as a ZIP, then upload it in the admin console's `Knowledge` page after you configure a model.
+
+This is the fastest non-API onboarding path.
+
+### 4. Integrate the widget
+
+```bash
+npm install portable-ai-agent-widget
+```
 
 ```js
 import AIAgent from "portable-ai-agent-widget";
@@ -30,63 +84,42 @@ AIAgent.init({
   backendUrl: "http://localhost:4096/api",
   apiKey: "sk-your-api-key",
   selfAuth: true,
+  routerPush: (route) => router.push(route),
 });
 ```
 
-生产环境建议改成 `selfAuth=false`，由你自己的服务向前端返回短期 token。
+## CLI Reference
 
-## `webGenerate` 是做什么的
-
-`webGenerate` 不直接扫描源码，而是先把工作流安装到你的助手里，再通过助手命令生成：
-
-- `webAIDocs/routes.md`
-- `webAIDocs/page-xxx.md`
-
-安装后：
-
-- Codex 用 `$webGenerate .`
-- Claude / Cursor / Gemini / Copilot / Trae 等用 `/webGenerate .`
-
-增量同步：
-
-- Codex 用 `$webGenerate . --update`
-- 其他助手用 `/webGenerate . --update`
-
-## 常用命令
+Install or remove assistant workflows:
 
 ```bash
-webGenerate codex install
-webGenerate claude install
-webGenerate cursor install
-webGenerate gemini install
-webGenerate trae install
+webGenerate <platform> install
+webGenerate <platform> uninstall
+webGenerate install --platform <platform>
 ```
 
-也支持：
+Supported `<platform>` values:
 
-- `webGenerate <platform> uninstall`
-- `webGenerate MCP`
-- `webGenerate MCP --root ./your-project`
+- `claude`
+- `codex`
+- `opencode`
+- `copilot-cli`
+- `vscode-copilot`
+- `gemini`
+- `antigravity`
+- `cursor`
+- `trae`
+- `trae-cn`
 
-`MCP` 模式会启动一个只读 MCP Server，用于查询当前项目的 `webAIDocs/`。
-
-## 本地调用方式
-
-如果你是本地安装：
+Built-in MCP mode:
 
 ```bash
-npx webGenerate codex install
+webGenerate MCP
+webGenerate MCP --root ./your-project
 ```
 
-如果你是全局安装：
+## Learn More
 
-```bash
-npm install -g portable-ai-agent-widget
-webGenerate codex install
-```
-
-## 更多文档
-
-- GitHub 仓库：<https://github.com/hyb654197815/web-ai>
-- 架构说明：<https://github.com/hyb654197815/web-ai/blob/main/ARCHITECTURE.md>
-- 快速开始：<https://github.com/hyb654197815/web-ai/blob/main/QUICK_START.md>
+- GitHub: <https://github.com/hyb654197815/web-ai>
+- English repo README: <https://github.com/hyb654197815/web-ai/blob/main/README.md>
+- Chinese repo README: <https://github.com/hyb654197815/web-ai/blob/main/README.zh-CN.md>

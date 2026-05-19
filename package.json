@@ -1,7 +1,7 @@
 {
   "name": "portable-ai-agent-widget",
   "version": "1.0.5",
-  "description": "便携式前端 AI Agent 入口 - 页面问答、路由跳转与表单操作",
+  "description": "Generate business docs for coding agents and quickly onboard a frontend AI agent",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -41,6 +41,7 @@
   "files": [
     "dist",
     "README.md",
+    "README.zh-CN.md",
     "ARCHITECTURE.md",
     "PRINCIPLES.md",
     "LICENSE",
