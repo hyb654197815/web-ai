@@ -1,6 +1,6 @@
 {
   "name": "portable-ai-agent-widget",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Generate business docs for coding agents and quickly onboard a frontend AI agent",
   "license": "MIT",
   "repository": {
